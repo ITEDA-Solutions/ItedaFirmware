@@ -94,7 +94,7 @@ bool checkForOTA() {
   client.setInsecure();
   
   HTTPClient http;
-  http.begin(client, "https://bujo-eayn.github.io/ItedaFirmware/ota/manifest.json"); // Your GitHub Pages URL
+  http.begin(client, "https://bujo-eayn.github.io/ItedaFirmware/manifest.json"); // Your GitHub Pages URL
   int code = http.GET();
   
   if (code != 200) {
