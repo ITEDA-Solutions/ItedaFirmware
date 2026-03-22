@@ -14,11 +14,17 @@ jobs:
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
+      - name: Install ESP32 Platform
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
       - name: Compile Firmware
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32wrover ItedaFirmware.ino
-          mkdir -p ota
-          cp $(arduino-cli compile --fqbn esp32:esp32:lolin32-lite --show-binary ItedaFirmware.ino) ota/ItedaFirmware.bin
+          arduino-cli compile --fqbn esp32:esp32:lolin32-lite --output-dir ./ota ItedaFirmware.ino
+          mv ./ota/ItedaFirmware.ino.bin ./ota/ItedaFirmware.bin
 
       - name: Generate OTA Manifest
         run: |
