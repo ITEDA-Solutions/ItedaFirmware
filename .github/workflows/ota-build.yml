@@ -24,7 +24,7 @@ jobs:
         run: |
           echo '{
             "version": "v1.0.${{ github.run_number }}",
-            "bin_url": "https://bujo-eayn.github.io/dryer_firmware/ota/ItedaFirmware.bin"
+            "bin_url": "https://bujo-eayn.github.io/ItedaFirmware/ota/ItedaFirmware.bin"
           }' > ota/manifest.json
 
       - name: Deploy to GitHub Pages
