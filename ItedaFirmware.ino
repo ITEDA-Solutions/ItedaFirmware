@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "v1.0.9"; 
+const char* VERSION = "v1.0.5"; 
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -71,24 +71,65 @@ String getTimestamp() {
 
 // -------------------- OTA --------------------
 void checkOTA() {
-  Serial.println("[OTA] Checking...");
-  WiFiClientSecure client; client.setInsecure();
+  Serial.println("\n[OTA] Checking...");
+  WiFiClientSecure client; 
+  client.setInsecure();
   HTTPClient http;
 
   if (http.begin(client, MANIFEST_URL)) {
     int code = http.GET();
+
     if (code == HTTP_CODE_OK) {
+      String payload = http.getString();
+      Serial.println("[OTA] Manifest:");
+      Serial.println(payload);
+
       StaticJsonDocument<256> doc;
-      deserializeJson(doc, http.getString());
+      DeserializationError err = deserializeJson(doc, payload);
+
+      if (err) {
+        Serial.println("[OTA] JSON parse failed");
+        return;
+      }
 
       const char* newVersion = doc["version"];
+      const char* binUrl = doc["bin_url"];
+
+      Serial.print("[OTA] Current: ");
+      Serial.println(VERSION);
+      Serial.print("[OTA] Available: ");
+      Serial.println(newVersion);
 
       if (strcmp(newVersion, VERSION) != 0) {
-        Serial.println("[OTA] Updating...");
-        digitalWrite(LED_YELLOW, HIGH); // solid ON during update
-        httpUpdate.update(client, (const char*)doc["bin_url"]);
+        Serial.println("[OTA] Updating firmware...");
+        digitalWrite(LED_YELLOW, HIGH);
+
+        t_httpUpdate_return ret = httpUpdate.update(client, binUrl);
+
+        switch (ret) {
+          case HTTP_UPDATE_FAILED:
+            Serial.printf("[OTA] Failed (%d): %s\n",
+              httpUpdate.getLastError(),
+              httpUpdate.getLastErrorString().c_str());
+            break;
+
+          case HTTP_UPDATE_NO_UPDATES:
+            Serial.println("[OTA] No updates available");
+            break;
+
+          case HTTP_UPDATE_OK:
+            Serial.println("[OTA] Update successful. Rebooting...");
+            break;
+        }
+
+      } else {
+        Serial.println("[OTA] Firmware is up to date ✅");
       }
+
+    } else {
+      Serial.printf("[OTA] HTTP error: %d\n", code);
     }
+
     http.end();
   }
 }
@@ -97,10 +138,12 @@ void checkOTA() {
 void sendPayload(float t[], float h[], int m[], int current) {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client; client.setInsecure();
+  WiFiClientSecure client; 
+  client.setInsecure();
   HTTPClient https;
+
   StaticJsonDocument<512> doc;
-  
+
   doc["dryer_id"] = "ITEDA_DRYER_01";
   doc["version"] = VERSION;
   doc["timestamp"] = getTimestamp();
@@ -114,9 +157,26 @@ void sendPayload(float t[], float h[], int m[], int current) {
   String json;
   serializeJson(doc, json);
 
+  Serial.println("\n[API] Sending payload:");
+  Serial.println(json);
+
   if (https.begin(client, API_URL)) {
     https.addHeader("Content-Type", "application/json");
-    https.POST(json);
+    https.addHeader("Authorization", "Bearer " + String(AUTH_TOKEN)); // optional
+
+    int httpCode = https.POST(json);
+
+    Serial.print("[API] HTTP Code: ");
+    Serial.println(httpCode);
+
+    if (httpCode > 0) {
+      String response = https.getString();
+      Serial.println("[API] Response:");
+      Serial.println(response);
+    } else {
+      Serial.println("[API] Request failed!");
+    }
+
     https.end();
   }
 }
@@ -138,7 +198,7 @@ void setup() {
 
   WiFi.begin(ssid, password);
 
-  // WiFi connecting blink (fast yellow)
+  // WiFi connecting blink
   while (WiFi.status() != WL_CONNECTED) {
     digitalWrite(LED_YELLOW, !digitalRead(LED_YELLOW));
     delay(300);
@@ -184,9 +244,19 @@ void loop() {
   digitalWrite(HEATER_2, heaterActive);
   digitalWrite(FAN_RELAY, HIGH);
 
+  // -------- STATUS LOG --------
+  Serial.print("[STATUS] Temp: ");
+  Serial.print(ts[0]);
+  Serial.print(" | Setpoint: ");
+  Serial.print(Setpoint);
+  Serial.print(" | Duty: ");
+  Serial.print((Output / WindowSize) * 100.0);
+  Serial.print("% | Heater: ");
+  Serial.println(heaterActive ? "ON" : "OFF");
+
   // ---------------- LED LOGIC ----------------
 
-  // GREEN → heartbeat (every 1s)
+  // GREEN → heartbeat
   if (now - lastBlinkGreen > 1000) {
     greenState = !greenState;
     digitalWrite(LED_GREEN, greenState);
@@ -204,7 +274,7 @@ void loop() {
     }
   }
 
-  // YELLOW → idle slow blink (OTA handled separately)
+  // YELLOW → idle blink
   if (now - lastBlinkYellow > 3000) {
     yellowState = !yellowState;
     digitalWrite(LED_YELLOW, yellowState);
