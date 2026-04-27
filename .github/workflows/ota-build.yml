@@ -29,9 +29,11 @@ jobs:
           arduino-cli lib install "DHT sensor library"
           arduino-cli lib install "Adafruit Unified Sensor"
           arduino-cli lib install "ArduinoJson@6.21.5"
+          arduino-cli lib install "PID"
 
       - name: Compile Firmware
         run: |
+          # Note: Using the generic esp32s3 FQBN for the WROOM-1 module
           arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota ItedaFirmware.ino
           mv ./ota/ItedaFirmware.ino.bin ./ota/ItedaFirmware.bin
 
