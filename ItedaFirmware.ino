@@ -40,7 +40,8 @@ const char* AUTH_TOKEN = "YOUR_TOKEN";
 // -------------------- GLOBALS --------------------
 DHT dhts[] = {{DHTPIN1, DHTTYPE}, {DHTPIN2, DHTTYPE}, {DHTPIN3, DHTTYPE}, {DHTPIN4, DHTTYPE}};
 
-double Setpoint = 47.5, Input, Output;
+double Setpoint = 47.5; // Aiming for middle of 45-50 range
+double Input, Output;
 double Kp=2, Ki=5, Kd=1; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
@@ -52,6 +53,7 @@ bool heaterActive = false;
 String getTimestamp() {
   time_t now; time(&now);
   struct tm *ti = gmtime(&now);
+  if (ti->tm_year < 100) return "NTP_NOT_READY";
   char buf[30]; strftime(buf, 30, "%Y-%m-%dT%H:%M:%SZ", ti);
   return String(buf);
 }
@@ -85,28 +87,23 @@ void sendPayload(float t[], float h[], int m[], int current) {
   doc["version"] = VERSION;
   doc["timestamp"] = getTimestamp();
 
-  // Temperature & Humidity
+  // Sensors
   doc["temp_chamber"] = t[0];
-  doc["temp_internal_2"] = t[1];
-  doc["temp_internal_3"] = t[2];
+  doc["temp_int_2"] = t[1];
+  doc["temp_int_3"] = t[2];
   doc["temp_ambient"] = t[3];
   doc["hum_chamber"] = h[0];
   doc["hum_ambient"] = h[3];
-
-  // Moisture
   doc["moisture_1"] = m[0];
   doc["moisture_2"] = m[1];
   doc["moisture_3"] = m[2];
   doc["moisture_4"] = m[3];
 
-  // Relay & Control States
-  doc["relay_heater_1"] = heaterActive;
-  doc["relay_heater_2"] = heaterActive;
-  doc["relay_fan"] = true; // Constant for airflow
-  doc["pid_output_pct"] = (Output / WindowSize) * 100.0;
-  
-  // Power
-  doc["current_adc_raw"] = current;
+  // Control States
+  doc["heater_active"] = heaterActive;
+  doc["fan_active"] = true; 
+  doc["pid_output"] = Output;
+  doc["current_raw"] = current;
 
   String json;
   serializeJson(doc, json);
@@ -162,10 +159,10 @@ void loop() {
   digitalWrite(HEATER_1, heaterActive);
   digitalWrite(HEATER_2, heaterActive);
   digitalWrite(LED_RED, heaterActive);
-  digitalWrite(FAN_RELAY, HIGH); 
+  digitalWrite(FAN_RELAY, HIGH); // Always on
 
   static unsigned long lastSend = 0;
-  if (now - lastSend > 15000) {
+  if (now - lastSend > 10000) {
     sendPayload(ts, hs, ms, analogRead(CURRENT_PIN));
     lastSend = now;
   }
