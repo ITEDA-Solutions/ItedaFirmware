@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "v1.0.6"; 
+const char* VERSION = "v1.0.7"; 
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -51,6 +51,15 @@ int WindowSize = 5000;
 unsigned long windowStartTime;
 bool heaterActive = false;
 
+// LED timing
+unsigned long lastBlinkGreen = 0;
+unsigned long lastBlinkYellow = 0;
+unsigned long lastBlinkRed = 0;
+
+bool greenState = false;
+bool yellowState = false;
+bool redState = false;
+
 // -------------------- UTILITIES --------------------
 String getTimestamp() {
   time_t now; time(&now);
@@ -62,51 +71,35 @@ String getTimestamp() {
 
 // -------------------- OTA --------------------
 void checkOTA() {
-  Serial.println("[OTA] Checking for updates...");
+  Serial.println("[OTA] Checking...");
   WiFiClientSecure client; client.setInsecure();
   HTTPClient http;
 
   if (http.begin(client, MANIFEST_URL)) {
     int code = http.GET();
-    Serial.print("[OTA] HTTP Response: ");
-    Serial.println(code);
-
     if (code == HTTP_CODE_OK) {
       StaticJsonDocument<256> doc;
       deserializeJson(doc, http.getString());
 
       const char* newVersion = doc["version"];
-      Serial.print("[OTA] Current: ");
-      Serial.print(VERSION);
-      Serial.print(" | Available: ");
-      Serial.println(newVersion);
 
       if (strcmp(newVersion, VERSION) != 0) {
-        Serial.println("[OTA] New version found! Updating...");
-        digitalWrite(LED_YELLOW, HIGH);
+        Serial.println("[OTA] Updating...");
+        digitalWrite(LED_YELLOW, HIGH); // solid ON during update
         httpUpdate.update(client, (const char*)doc["bin_url"]);
-      } else {
-        Serial.println("[OTA] Already up to date.");
       }
     }
     http.end();
-  } else {
-    Serial.println("[OTA] Failed to connect to manifest.");
   }
 }
 
 // -------------------- API --------------------
 void sendPayload(float t[], float h[], int m[], int current) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[API] WiFi not connected, skipping send.");
-    return;
-  }
-
-  Serial.println("[API] Sending payload...");
+  if (WiFi.status() != WL_CONNECTED) return;
 
   WiFiClientSecure client; client.setInsecure();
   HTTPClient https;
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<512> doc;
   
   doc["dryer_id"] = "ITEDA_DRYER_01";
   doc["version"] = VERSION;
@@ -121,17 +114,9 @@ void sendPayload(float t[], float h[], int m[], int current) {
   String json;
   serializeJson(doc, json);
 
-  Serial.print("[API] Payload: ");
-  Serial.println(json);
-
   if (https.begin(client, API_URL)) {
     https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + String(AUTH_TOKEN));
-    int response = https.POST(json);
-
-    Serial.print("[API] Response code: ");
-    Serial.println(response);
-
+    https.POST(json);
     https.end();
   }
 }
@@ -139,9 +124,7 @@ void sendPayload(float t[], float h[], int m[], int current) {
 // -------------------- SETUP --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n===== SYSTEM BOOT =====");
-  Serial.print("Firmware Version: ");
-  Serial.println(VERSION);
+  Serial.println("Booting v1.0.7");
 
   pinMode(HEATER_1, OUTPUT); 
   pinMode(HEATER_2, OUTPUT);
@@ -153,25 +136,18 @@ void setup() {
   for (int i = 0; i < 4; i++) dhts[i].begin();
   analogReadResolution(12);
 
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-
   WiFi.begin(ssid, password);
+
+  // WiFi connecting blink (fast yellow)
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
     digitalWrite(LED_YELLOW, !digitalRead(LED_YELLOW));
+    delay(300);
   }
 
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
-
   digitalWrite(LED_YELLOW, LOW);
-  digitalWrite(LED_GREEN, HIGH);
-  
+  Serial.println("WiFi Connected");
+
   configTime(0, 0, "pool.ntp.org");
-  Serial.println("NTP configured");
 
   windowStartTime = millis();
   myPID.SetOutputLimits(0, WindowSize);
@@ -187,36 +163,16 @@ void loop() {
   for (int i = 0; i < 4; i++) {
     ts[i] = dhts[i].readTemperature();
     hs[i] = dhts[i].readHumidity();
-
-    Serial.print("T"); Serial.print(i); Serial.print(": ");
-    Serial.print(ts[i]); Serial.print("C | H");
-    Serial.print(i); Serial.print(": ");
-    Serial.print(hs[i]); Serial.print("%  ");
   }
-  Serial.println();
 
   int ms[4] = {
     analogRead(MOISTURE1), analogRead(MOISTURE2),
     analogRead(MOISTURE3), analogRead(MOISTURE4)
   };
 
-  Serial.print("Moisture: ");
-  for (int i = 0; i < 4; i++) {
-    Serial.print(ms[i]); Serial.print(" ");
-  }
-  Serial.println();
-
   if (!isnan(ts[0])) {
-    Input = (double)ts[0];
+    Input = ts[0];
     myPID.Compute();
-
-    Serial.print("PID -> Input: ");
-    Serial.print(Input);
-    Serial.print(" | Output: ");
-    Serial.print(Output);
-    Serial.print(" | Duty: ");
-    Serial.print((Output / WindowSize) * 100.0);
-    Serial.println("%");
   }
 
   unsigned long now = millis();
@@ -224,14 +180,38 @@ void loop() {
 
   heaterActive = (Output > (now - windowStartTime));
 
-  Serial.print("Heater: ");
-  Serial.println(heaterActive ? "ON" : "OFF");
-
   digitalWrite(HEATER_1, heaterActive);
   digitalWrite(HEATER_2, heaterActive);
-  digitalWrite(LED_RED, heaterActive);
-  digitalWrite(FAN_RELAY, HIGH); 
+  digitalWrite(FAN_RELAY, HIGH);
 
+  // ---------------- LED LOGIC ----------------
+
+  // GREEN → heartbeat (every 1s)
+  if (now - lastBlinkGreen > 1000) {
+    greenState = !greenState;
+    digitalWrite(LED_GREEN, greenState);
+    lastBlinkGreen = now;
+  }
+
+  // RED → heater OR standby blink
+  if (heaterActive) {
+    digitalWrite(LED_RED, HIGH);
+  } else {
+    if (now - lastBlinkRed > 2000) {
+      redState = !redState;
+      digitalWrite(LED_RED, redState);
+      lastBlinkRed = now;
+    }
+  }
+
+  // YELLOW → idle slow blink (OTA handled separately)
+  if (now - lastBlinkYellow > 3000) {
+    yellowState = !yellowState;
+    digitalWrite(LED_YELLOW, yellowState);
+    lastBlinkYellow = now;
+  }
+
+  // ---------------- API + OTA ----------------
   static unsigned long lastSend = 0;
   if (now - lastSend > 10000) {
     sendPayload(ts, hs, ms, analogRead(CURRENT_PIN));
@@ -243,6 +223,4 @@ void loop() {
     checkOTA();
     lastOTA = now;
   }
-
-  delay(2000); // makes logs readable
 }
