@@ -4,12 +4,17 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allows manual triggering for testing
+  workflow_dispatch:
 
 permissions:
   contents: write
-  pages: write      # Added for Pages deployment
+  pages: write
   id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
@@ -38,23 +43,24 @@ jobs:
       - name: Compile Firmware
         run: |
           mkdir -p ota_build
-          # Compiling for ESP32-S3-WROOM-1 (N16)
+          # Compiling for ESP32-S3-WROOM-1 (N16) found in schematic 
           arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota_build ItedaFirmware.ino
-          # Standardize filename for the manifest
           mv ./ota_build/ItedaFirmware.ino.bin ./ota_build/ItedaFirmware.bin
 
       - name: Generate OTA Manifest
         run: |
-          # Ensure this URL matches your GitHub username and Repo name
+          # Dynamically builds the URL for the bin file on GitHub Pages 
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
           echo '{
             "version": "v1.0.${{ github.run_number }}",
-            "bin_url": "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ItedaFirmware.bin"
+            "bin_url": "https://${{ github.repository_owner }}.github.io/'$REPO_NAME'/ItedaFirmware.bin"
           }' > ota_build/manifest.json
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./ota_build
-          publish_branch: gh-pages
-          force_push: true
+          path: ./ota_build
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
