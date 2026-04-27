@@ -12,35 +12,40 @@ const char* VERSION = "v1.0.4";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
-const char* MANIFEST_URL = "https://bujo-eayn.github.io/ItedaFirmware/manifest.json";
+// Ensure this URL matches your actual GitHub Pages output verified in your settings
+const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
 
-// -------------------- PIN DEFINITIONS (Schematic V1.0) --------------------
-#define DHTPIN1 7    // DHTS1 (Main Control)
-#define DHTPIN2 13   // DHTS2
-#define DHTPIN3 18   // DHTS3
-#define DHTPIN4 19   // DHTS4
+// -------------------- PIN DEFINITIONS (Per Schematic V1.0) --------------------
+// DHT Sensors
+#define DHTPIN1 7    // DHTS1 (Main Control) [cite: 41]
+#define DHTPIN2 8    // DHTS2 [cite: 62]
+#define DHTPIN3 11   // DHTS3 [cite: 79]
+#define DHTPIN4 12   // DHTS4 [cite: 81]
 #define DHTTYPE DHT22
 
-#define MOISTURE1 1  // MOS1
-#define MOISTURE2 2  // MOS2
-#define MOISTURE3 4  // MOS3
-#define MOISTURE4 5  // MOS4
+// Moisture Sensors (Analog MOS1-MOS4)
+#define MOISTURE1 1  // MOS1 [cite: 19]
+#define MOISTURE2 2  // MOS2 [cite: 27]
+#define MOISTURE3 4  // MOS3 [cite: 30]
+#define MOISTURE4 5  // MOS4 [cite: 34]
 
-#define HEATER_1   21   // RHEAT
-#define HEATER_2   10   // RHEAT2
-#define FAN_RELAY  12   // RFAN
+// Relays & Actuators
+#define HEATER_1   21   // RHEAT [cite: 90]
+#define HEATER_2   10   // RHEAT2 [cite: 52]
+#define FAN_RELAY  18   // RFAN [cite: 57]
 
-#define LED_RED    8    // LED1 (Heat)
-#define LED_YELLOW 9    // LED2 (OTA)
-#define LED_GREEN  14   // LED3 (Status)
+// Status LEDs
+#define LED_RED    15   // LED1 (Heat) [cite: 45]
+#define LED_YELLOW 16   // LED2 (OTA) [cite: 49]
+#define LED_GREEN  13   // LED3 (Status) [cite: 64]
 
-#define CURRENT_PIN 6   // CSENSOR
+#define CURRENT_PIN 6   // CSENSOR [cite: 37]
 
 // -------------------- GLOBALS --------------------
 DHT dhts[] = {{DHTPIN1, DHTTYPE}, {DHTPIN2, DHTTYPE}, {DHTPIN3, DHTTYPE}, {DHTPIN4, DHTTYPE}};
 
-double Setpoint = 47.5; // Aiming for middle of 45-50 range
+double Setpoint = 47.5; 
 double Input, Output;
 double Kp=2, Ki=5, Kd=1; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
@@ -127,7 +132,12 @@ void setup() {
   analogReadResolution(12);
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(500);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    // Blink yellow while connecting
+    digitalWrite(LED_YELLOW, !digitalRead(LED_YELLOW));
+  }
+  digitalWrite(LED_YELLOW, LOW);
   
   configTime(0, 0, "pool.ntp.org");
   windowStartTime = millis();
@@ -159,7 +169,7 @@ void loop() {
   digitalWrite(HEATER_1, heaterActive);
   digitalWrite(HEATER_2, heaterActive);
   digitalWrite(LED_RED, heaterActive);
-  digitalWrite(FAN_RELAY, HIGH); // Always on
+  digitalWrite(FAN_RELAY, HIGH); // Always on for airflow
 
   static unsigned long lastSend = 0;
   if (now - lastSend > 10000) {
