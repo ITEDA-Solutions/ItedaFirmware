@@ -144,7 +144,7 @@ void sendPayload(float t[], float h[], int m[], int current) {
 
   StaticJsonDocument<512> doc;
 
-  doc["dryer_id"] = "ITEDA_DRYER_01";
+  doc["dryer_id"] = "REAL_DRYER";
   doc["version"] = VERSION;
   doc["timestamp"] = getTimestamp();
   doc["temp_chamber"] = t[0];
@@ -184,7 +184,7 @@ void sendPayload(float t[], float h[], int m[], int current) {
 // -------------------- SETUP --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("Booting v1.0.9");
+  Serial.println("Booting v1.0.5");
 
   pinMode(HEATER_1, OUTPUT); 
   pinMode(HEATER_2, OUTPUT);
