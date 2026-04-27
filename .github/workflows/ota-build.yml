@@ -32,7 +32,7 @@ jobs:
 
       - name: Compile Firmware
         run: |
-          arduino-cli compile --fqbn esp32:esp32:lolin32-lite --output-dir ./ota ItedaFirmware.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota ItedaFirmware.ino
           mv ./ota/ItedaFirmware.ino.bin ./ota/ItedaFirmware.bin
 
       - name: Generate OTA Manifest
