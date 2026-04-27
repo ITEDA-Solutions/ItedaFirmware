@@ -4,15 +4,19 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch: # Allows manual triggering for testing
 
 permissions:
   contents: write
+  pages: write      # Added for Pages deployment
+  id-token: write
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -33,19 +37,24 @@ jobs:
 
       - name: Compile Firmware
         run: |
-          # Note: Using the generic esp32s3 FQBN for the WROOM-1 module
-          arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota ItedaFirmware.ino
-          mv ./ota/ItedaFirmware.ino.bin ./ota/ItedaFirmware.bin
+          mkdir -p ota_build
+          # Compiling for ESP32-S3-WROOM-1 (N16)
+          arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota_build ItedaFirmware.ino
+          # Standardize filename for the manifest
+          mv ./ota_build/ItedaFirmware.ino.bin ./ota_build/ItedaFirmware.bin
 
       - name: Generate OTA Manifest
         run: |
+          # Ensure this URL matches your GitHub username and Repo name
           echo '{
             "version": "v1.0.${{ github.run_number }}",
-            "bin_url": "https://bujo-eayn.github.io/ItedaFirmware/ItedaFirmware.bin"
-          }' > ota/manifest.json
+            "bin_url": "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ItedaFirmware.bin"
+          }' > ota_build/manifest.json
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./ota
+          publish_dir: ./ota_build
+          publish_branch: gh-pages
+          force_push: true
