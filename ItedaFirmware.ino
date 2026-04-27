@@ -8,49 +8,49 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
+// The CI/CD script now pulls this string to generate the manifest.json
 const char* VERSION = "v1.0.4"; 
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
-// Ensure this URL matches your actual GitHub Pages output verified in your settings
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
 
 // -------------------- PIN DEFINITIONS (Per Schematic V1.0) --------------------
-// DHT Sensors
-#define DHTPIN1 7    // DHTS1 (Main Control) [cite: 41]
-#define DHTPIN2 8    // DHTS2 [cite: 62]
-#define DHTPIN3 11   // DHTS3 [cite: 79]
-#define DHTPIN4 12   // DHTS4 [cite: 81]
+// DHT Sensors [cite: 40, 61, 76, 77]
+#define DHTPIN1 7    // DHTS1 (Main Control)
+#define DHTPIN2 8    // DHTS2
+#define DHTPIN3 11   // DHTS3
+#define DHTPIN4 12   // DHTS4
 #define DHTTYPE DHT22
 
-// Moisture Sensors (Analog MOS1-MOS4)
-#define MOISTURE1 1  // MOS1 [cite: 19]
-#define MOISTURE2 2  // MOS2 [cite: 27]
-#define MOISTURE3 4  // MOS3 [cite: 30]
-#define MOISTURE4 5  // MOS4 [cite: 34]
+// Moisture Sensors (Analog MOS1-MOS4) [cite: 20, 28, 21, 22]
+#define MOISTURE1 1  // MOS1
+#define MOISTURE2 2  // MOS2
+#define MOISTURE3 4  // MOS3
+#define MOISTURE4 5  // MOS4
 
-// Relays & Actuators
-#define HEATER_1   21   // RHEAT [cite: 90]
-#define HEATER_2   10   // RHEAT2 [cite: 52]
-#define FAN_RELAY  18   // RFAN [cite: 57]
+// Relays & Actuators [cite: 51, 56, 89]
+#define HEATER_1   21   // RHEAT
+#define HEATER_2   10   // RHEAT2
+#define FAN_RELAY  18   // RFAN
 
-// Status LEDs
-#define LED_RED    15   // LED1 (Heat) [cite: 45]
-#define LED_YELLOW 16   // LED2 (OTA) [cite: 49]
-#define LED_GREEN  13   // LED3 (Status) [cite: 64]
+// Status LEDs [cite: 44, 48, 82]
+#define LED_RED    15   // LED1 (Heat)
+#define LED_YELLOW 16   // LED2 (OTA Status)
+#define LED_GREEN  13   // LED3 (System OK)
 
-#define CURRENT_PIN 6   // CSENSOR [cite: 37]
+#define CURRENT_PIN 6   // CSENSOR [cite: 36]
 
 // -------------------- GLOBALS --------------------
 DHT dhts[] = {{DHTPIN1, DHTTYPE}, {DHTPIN2, DHTTYPE}, {DHTPIN3, DHTTYPE}, {DHTPIN4, DHTTYPE}};
 
-double Setpoint = 47.5; 
+double Setpoint = 47.5; // Target temperature midpoint
 double Input, Output;
-double Kp=2, Ki=5, Kd=1; 
+double Kp=2.0, Ki=5.0, Kd=1.0; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
-int WindowSize = 5000; 
+int WindowSize = 5000; // 5-second relay window
 unsigned long windowStartTime;
 bool heaterActive = false;
 
@@ -64,13 +64,17 @@ String getTimestamp() {
 }
 
 void checkOTA() {
-  WiFiClientSecure client; client.setInsecure();
+  Serial.println("Checking OTA...");
+  WiFiClientSecure client; 
+  client.setInsecure();
   HTTPClient http;
   if (http.begin(client, MANIFEST_URL)) {
-    if (http.GET() == HTTP_CODE_OK) {
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
       StaticJsonDocument<256> doc;
       deserializeJson(doc, http.getString());
       if (strcmp(doc["version"], VERSION) != 0) {
+        Serial.println("New version detected. Updating...");
         digitalWrite(LED_YELLOW, HIGH);
         httpUpdate.update(client, (const char*)doc["bin_url"]);
       }
@@ -92,23 +96,27 @@ void sendPayload(float t[], float h[], int m[], int current) {
   doc["version"] = VERSION;
   doc["timestamp"] = getTimestamp();
 
-  // Sensors
-  doc["temp_chamber"] = t[0];
+  // Primary control sensor data
+  doc["temp_chamber"] = t[0]; 
+  doc["hum_chamber"] = h[0];
+
+  // Secondary sensors
   doc["temp_int_2"] = t[1];
   doc["temp_int_3"] = t[2];
   doc["temp_ambient"] = t[3];
-  doc["hum_chamber"] = h[0];
   doc["hum_ambient"] = h[3];
+
+  // Moisture levels (0-4095)
   doc["moisture_1"] = m[0];
   doc["moisture_2"] = m[1];
   doc["moisture_3"] = m[2];
   doc["moisture_4"] = m[3];
 
-  // Control States
+  // System status
   doc["heater_active"] = heaterActive;
   doc["fan_active"] = true; 
-  doc["pid_output"] = Output;
-  doc["current_raw"] = current;
+  doc["pid_duty_cycle"] = (Output / WindowSize) * 100.0;
+  doc["current_adc"] = current;
 
   String json;
   serializeJson(doc, json);
@@ -134,17 +142,16 @@ void setup() {
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    // Blink yellow while connecting
-    digitalWrite(LED_YELLOW, !digitalRead(LED_YELLOW));
+    digitalWrite(LED_YELLOW, !digitalRead(LED_YELLOW)); // Blink yellow during boot
   }
   digitalWrite(LED_YELLOW, LOW);
+  digitalWrite(LED_GREEN, HIGH); // Green constant = System Online
   
   configTime(0, 0, "pool.ntp.org");
   windowStartTime = millis();
   myPID.SetOutputLimits(0, WindowSize);
   myPID.SetMode(AUTOMATIC);
   
-  digitalWrite(LED_GREEN, HIGH);
   checkOTA(); 
 }
 
@@ -157,6 +164,7 @@ void loop() {
   }
   int ms[4] = {analogRead(MOISTURE1), analogRead(MOISTURE2), analogRead(MOISTURE3), analogRead(MOISTURE4)};
   
+  // PID Control via DHTS1 (IO7)
   if (!isnan(ts[0])) {
     Input = (double)ts[0];
     myPID.Compute();
@@ -164,19 +172,23 @@ void loop() {
 
   unsigned long now = millis();
   if (now - windowStartTime > WindowSize) windowStartTime += WindowSize;
+  
+  // Time-proportioning relay logic
   heaterActive = (Output > (now - windowStartTime));
 
   digitalWrite(HEATER_1, heaterActive);
   digitalWrite(HEATER_2, heaterActive);
-  digitalWrite(LED_RED, heaterActive);
-  digitalWrite(FAN_RELAY, HIGH); // Always on for airflow
+  digitalWrite(LED_RED, heaterActive); // Red LED mimics heater activity
+  digitalWrite(FAN_RELAY, HIGH); // Fan always runs during drying
 
+  // Periodic Reporting (10s)
   static unsigned long lastSend = 0;
   if (now - lastSend > 10000) {
     sendPayload(ts, hs, ms, analogRead(CURRENT_PIN));
     lastSend = now;
   }
 
+  // Hourly OTA Check
   static unsigned long lastOTA = 0;
   if (now - lastOTA > 3600000) {
     checkOTA();
