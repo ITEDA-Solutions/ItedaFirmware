@@ -8,9 +8,9 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "v1.0.7"; 
-const char* ssid = "dono-call";
-const char* password = "@ubiquitoU5";
+const char* VERSION = "v1.0.8"; 
+const char* ssid = "Giat";
+const char* password = "GiatGens";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
