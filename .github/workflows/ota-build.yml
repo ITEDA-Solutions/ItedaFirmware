@@ -2,8 +2,7 @@ name: Build & Deploy OTA
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -11,56 +10,41 @@ permissions:
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Install ESP32 Platform
+      - name: Install Platforms & Libs
         run: |
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
+          arduino-cli lib install "DHT sensor library" "Adafruit Unified Sensor" "ArduinoJson@6.21.5" "PID"
 
-      - name: Install Libraries
-        run: |
-          arduino-cli lib install "DHT sensor library"
-          arduino-cli lib install "Adafruit Unified Sensor"
-          arduino-cli lib install "ArduinoJson@6.21.5"
-          arduino-cli lib install "PID"
-
-      - name: Compile Firmware
+      - name: Compile
         run: |
           mkdir -p ota_build
-          # Compiling for ESP32-S3-WROOM-1 (N16) found in schematic 
           arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./ota_build ItedaFirmware.ino
           mv ./ota_build/ItedaFirmware.ino.bin ./ota_build/ItedaFirmware.bin
 
-      - name: Generate OTA Manifest
+      - name: Generate Sync'd Manifest
         run: |
-          # Dynamically builds the URL for the bin file on GitHub Pages 
+          # Extract version from .ino to prevent mismatch
+          VERSION=$(grep 'const char* VERSION =' ItedaFirmware.ino | cut -d'"' -f2)
           REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          echo '{
-            "version": "v1.0.${{ github.run_number }}",
-            "bin_url": "https://${{ github.repository_owner }}.github.io/'$REPO_NAME'/ItedaFirmware.bin"
-          }' > ota_build/manifest.json
+          echo "{
+            \"version\": \"$VERSION\",
+            \"bin_url\": \"https://${{ github.repository_owner }}.github.io/$REPO_NAME/ItedaFirmware.bin\"
+          }" > ota_build/manifest.json
 
-      - name: Upload Pages Artifact
+      - name: Upload Artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./ota_build
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - name: Deploy
         uses: actions/deploy-pages@v4
