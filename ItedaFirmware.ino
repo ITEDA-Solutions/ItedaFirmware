@@ -9,8 +9,8 @@
 
 // -------------------- CONFIGURATION --------------------
 const char* VERSION = "v1.0.9"; 
-const char* ssid = "Giat";
-const char* password = "GiatGens";
+const char* ssid = "dono-call";
+const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
@@ -124,7 +124,7 @@ void sendPayload(float t[], float h[], int m[], int current) {
 // -------------------- SETUP --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("Booting v1.0.7");
+  Serial.println("Booting v1.0.9");
 
   pinMode(HEATER_1, OUTPUT); 
   pinMode(HEATER_2, OUTPUT);
