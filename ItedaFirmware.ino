@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.2"; 
+const char* VERSION = "1.3"; 
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -18,9 +18,9 @@ const char* AUTH_TOKEN = "YOUR_TOKEN";
 // -------------------- PIN DEFINITIONS --------------------
 #define DHTPIN1 7    // Chamber Bottom
 #define DHTPIN2 8    // Chamber Middle
-#define DHTPIN3 11   // Chamber Top
-#define DHTPIN4 12   // Ambient
-#define DHTTYPE DHT22
+#define DHTPIN3 9  // Chamber Top
+#define DHTPIN4 10   // Ambient
+#define DHTTYPE DHT11
 
 #define MOISTURE1 1  // Tray 1
 #define MOISTURE2 2  // Tray 2
