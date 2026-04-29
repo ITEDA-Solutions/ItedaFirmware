@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.8";
+const char* VERSION = "1.9";
 const char* ssid = "masinde";
 const char* password = "14414@Starehe";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
