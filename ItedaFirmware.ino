@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.5";
+const char* VERSION = "1.6";
 const char* ssid = "masinde";
 const char* password = "14414@Starehe";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -183,10 +183,6 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   doc["heater_status"] = heaterActive;
 
   doc["door_status"] = false;          // No door sensor yet
-
-  doc["solar_voltage"] = 0;            // Placeholder
-  doc["battery_level"] = 0;            // Placeholder
-  doc["battery_voltage"] = 0;          // Placeholder
 
   doc["power_consumption_w"] = currentRaw;
 
