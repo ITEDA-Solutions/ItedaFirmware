@@ -1,4 +1,4 @@
-name: Build & Deploy OTA
+name: Build & Deploy OTA (Stable)
 
 on:
   push:
@@ -19,12 +19,16 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+
+      # ---------------- CHECKOUT ----------------
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # ---------------- ARDUINO CLI ----------------
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
+      # ---------------- ESP32 CORE ----------------
       - name: Install ESP32 Platform
         run: |
           arduino-cli config init
@@ -35,6 +39,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
+      # ---------------- LIBRARIES ----------------
       - name: Install Libraries
         run: |
           arduino-cli lib install "DHT sensor library"
@@ -42,6 +47,11 @@ jobs:
           arduino-cli lib install "ArduinoJson@6.21.5"
           arduino-cli lib install "PID"
 
+      # ---------------- CLEAN BUILD ----------------
+      - name: Clean Build Folder
+        run: rm -rf ota_build
+
+      # ---------------- COMPILE ----------------
       - name: Compile Firmware
         run: |
           mkdir -p ota_build
@@ -51,28 +61,41 @@ jobs:
             --output-dir ./ota_build \
             ItedaFirmware.ino
 
-          mv ./ota_build/ItedaFirmware.ino.bin ./ota_build/ItedaFirmware.bin
+          cp ota_build/*.bin ota_build/ItedaFirmware.bin
 
+      # ---------------- BUILD VERSION (100% RELIABLE) ----------------
+      - name: Extract Version
+        run: |
+          VERSION=$(grep 'VERSION' ItedaFirmware.ino | head -n1 | cut -d'"' -f2)
+
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # ---------------- MANIFEST ----------------
       - name: Generate Manifest
         run: |
-          VERSION=$(sed -n 's/.*VERSION = "\(.*\)";.*/\1/p' ItedaFirmware.ino)
+          REPO_NAME=$(basename "${{ github.repository }}")
 
-          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          echo "Building manifest for version: $VERSION"
 
-          echo "Detected Version: $VERSION"
-
-          cat <<EOF > ota_build/manifest.json
+          cat > ota_build/manifest.json <<EOF
           {
             "version": "$VERSION",
-            "bin_url": "https://${{ github.repository_owner }}.github.io/$REPO_NAME/ItedaFirmware.bin"
+            "build_number": "${GITHUB_RUN_NUMBER}",
+            "bin_url": "https://${{ github.repository_owner }}.github.io/$REPO_NAME/ItedaFirmware.bin?v=${GITHUB_RUN_NUMBER}"
           }
           EOF
 
+      # ---------------- DEBUG OUTPUT ----------------
+      - name: Show Build Files
+        run: ls -lah ota_build
+
+      # ---------------- UPLOAD ARTIFACT ----------------
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./ota_build
 
+      # ---------------- DEPLOY ----------------
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
