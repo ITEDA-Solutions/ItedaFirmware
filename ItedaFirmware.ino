@@ -7,37 +7,32 @@
 #include <PID_v1.h>
 #include <time.h>
 
-// -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.9";
+// ---------------- CONFIG ----------------
+const char* VERSION = "2.0";
 const char* ssid = "masinde";
 const char* password = "14414@Starehe";
+
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
 
-// -------------------- PINS --------------------
+// ---------------- PINS ----------------
 #define DHTPIN1 7
 #define DHTPIN2 8
 #define DHTPIN3 9
 #define DHTPIN4 10
 #define DHTTYPE DHT11
 
+#define HEATER_1 21
+#define HEATER_2 17
+#define FAN_RELAY 18
+
 #define MOISTURE1 1
 #define MOISTURE2 2
 #define MOISTURE3 4
 #define MOISTURE4 5
 
-#define HEATER_1 21
-#define HEATER_2 17
-#define FAN_RELAY 18
-
-#define LED_RED 15
-#define LED_YELLOW 16
-#define LED_GREEN 13
-
-#define CURRENT_PIN 6
-
-// -------------------- DHT --------------------
+// ---------------- DHT ----------------
 DHT dhts[] = {
   {DHTPIN1, DHTTYPE},
   {DHTPIN2, DHTTYPE},
@@ -45,14 +40,14 @@ DHT dhts[] = {
   {DHTPIN4, DHTTYPE}
 };
 
-// -------------------- PID --------------------
+// ---------------- PID ----------------
 double Setpoint = 47.5, Input, Output;
 double Kp = 2, Ki = 5, Kd = 1;
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 int WindowSize = 5000;
 
-// -------------------- SHARED DATA --------------------
+// ---------------- SHARED DATA ----------------
 struct SystemData {
   float temp[4];
   float hum[4];
@@ -67,7 +62,7 @@ SystemData data;
 
 SemaphoreHandle_t dataMutex;
 
-// -------------------- UTILS --------------------
+// ---------------- DEVICE ID ----------------
 String getDeviceID() {
   uint64_t chipid = ESP.getEfuseMac();
   char id[25];
@@ -77,19 +72,7 @@ String getDeviceID() {
   return String(id);
 }
 
-String getTimestamp() {
-  time_t now;
-  time(&now);
-  struct tm *ti = gmtime(&now);
-
-  if (ti->tm_year < 100) return "NTP_NOT_READY";
-
-  char buf[30];
-  strftime(buf, 30, "%Y-%m-%dT%H:%M:%SZ", ti);
-  return String(buf);
-}
-
-// -------------------- OTA --------------------
+// ---------------- OTA ----------------
 void checkOTA() {
 
   WiFiClientSecure client;
@@ -122,8 +105,8 @@ void checkOTA() {
   }
 }
 
-// -------------------- API SEND --------------------
-void sendPayloadFromSharedData() {
+// ---------------- API ----------------
+void sendPayload() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -132,33 +115,13 @@ void sendPayloadFromSharedData() {
 
   HTTPClient https;
 
-  StaticJsonDocument<2048> doc;
+  StaticJsonDocument<1024> doc;
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
 
   doc["dryer_id"] = getDeviceID();
-  doc["timestamp"] = getTimestamp();
-
-  doc["chamber_temp"] = data.temp[1];
-  doc["ambient_temp"] = data.temp[3];
-  doc["heater_temp"] = data.temp[2];
-
-  doc["internal_humidity"] = data.hum[1];
-  doc["external_humidity"] = data.hum[3];
-
   doc["heater_status"] = data.heater;
-  doc["power_consumption_w"] = data.current;
-
-  JsonObject sensorValues = doc.createNestedObject("sensor_values");
-
-  for (int i = 0; i < 4; i++) {
-    sensorValues["temp_" + String(i)] = data.temp[i];
-    sensorValues["hum_" + String(i)] = data.hum[i];
-    sensorValues["moisture_" + String(i)] = data.moisture[i];
-  }
-
-  sensorValues["pid_input"] = data.pidInput;
-  sensorValues["pid_output"] = data.pidOutput;
+  doc["chamber_temp"] = data.temp[1];
 
   xSemaphoreGive(dataMutex);
 
@@ -174,9 +137,11 @@ void sendPayloadFromSharedData() {
 }
 
 // =========================================================
-// TASK 1: SENSOR TASK
+// SENSOR TASK
 // =========================================================
 void sensorTask(void *pv) {
+
+  Serial.println("[TASK] Sensor task started");
 
   while (true) {
 
@@ -190,34 +155,36 @@ void sensorTask(void *pv) {
     int m[4] = {
       analogRead(MOISTURE1),
       analogRead(MOISTURE2),
-      MOISTURE3,
-      MOISTURE4
+      analogRead(MOISTURE3),
+      analogRead(MOISTURE4)
     };
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
 
     for (int i = 0; i < 4; i++) {
-      data.temp[i] = t[i];
-      data.hum[i] = h[i];
+      if (!isnan(t[i])) data.temp[i] = t[i];
+      if (!isnan(h[i])) data.hum[i] = h[i];
       data.moisture[i] = m[i];
     }
 
     xSemaphoreGive(dataMutex);
 
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(3000));
   }
 }
 
 // =========================================================
-// TASK 2: CONTROL TASK (PID)
+// CONTROL TASK
 // =========================================================
 void controlTask(void *pv) {
+
+  Serial.println("[TASK] Control task started");
 
   unsigned long windowStart = millis();
 
   while (true) {
 
-    float input;
+    float input = 0;
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
     input = data.temp[1];
@@ -245,27 +212,31 @@ void controlTask(void *pv) {
     data.pidOutput = Output;
     xSemaphoreGive(dataMutex);
 
-    vTaskDelay(200 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(200));
   }
 }
 
 // =========================================================
-// TASK 3: NETWORK TASK
+// NETWORK TASK
 // =========================================================
 void networkTask(void *pv) {
 
+  Serial.println("[TASK] Network task started");
+
   while (true) {
 
-    sendPayloadFromSharedData();
+    sendPayload();
 
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(10000));
   }
 }
 
 // =========================================================
-// TASK 4: OTA TASK
+// OTA TASK
 // =========================================================
 void otaTask(void *pv) {
+
+  Serial.println("[TASK] OTA task started");
 
   while (true) {
 
@@ -273,7 +244,7 @@ void otaTask(void *pv) {
       checkOTA();
     }
 
-    vTaskDelay(3600000 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(3600000));
   }
 }
 
@@ -283,12 +254,20 @@ void otaTask(void *pv) {
 void setup() {
 
   Serial.begin(115200);
-  delay(1000);
+  delay(1500);
+
+  Serial.println("\n[BOOT] ITEDA SYSTEM STARTING...");
 
   dataMutex = xSemaphoreCreateMutex();
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(300);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  Serial.println("\n[WIFI] Connected");
 
   configTime(0, 0, "pool.ntp.org");
 
@@ -303,14 +282,14 @@ void setup() {
   myPID.SetMode(AUTOMATIC);
 
   // ---------------- TASKS ----------------
-  xTaskCreatePinnedToCore(sensorTask,  "sensor", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(controlTask, "control", 4096, NULL, 5, NULL, 1);
-  xTaskCreatePinnedToCore(networkTask, "network", 8192, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(otaTask,     "ota",     6144, NULL, 1, NULL, 0);
+  xTaskCreate(sensorTask,  "sensor", 4096, NULL, 3, NULL);
+  xTaskCreate(controlTask, "control", 4096, NULL, 4, NULL);
+  xTaskCreate(networkTask, "network", 8192, NULL, 2, NULL);
+  xTaskCreate(otaTask,     "ota",     6144, NULL, 1, NULL);
 }
 
 // =========================================================
-// LOOP (NOT USED)
+// LOOP NOT USED
 // =========================================================
 void loop() {
   vTaskDelay(portMAX_DELAY);
