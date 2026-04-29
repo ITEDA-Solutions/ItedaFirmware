@@ -47,7 +47,7 @@ jobs:
           mkdir -p ota_build
 
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=default_16MB \
+            --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=app3M_fat9M_16MB \
             --output-dir ./ota_build \
             ItedaFirmware.ino
 
