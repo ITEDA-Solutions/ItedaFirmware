@@ -1,4 +1,4 @@
-name: Build & Deploy OTA (Stable)
+name: Build & Deploy OTA (Stable Fixed)
 
 on:
   push:
@@ -47,7 +47,7 @@ jobs:
           arduino-cli lib install "ArduinoJson@6.21.5"
           arduino-cli lib install "PID"
 
-      # ---------------- CLEAN BUILD ----------------
+      # ---------------- CLEAN ----------------
       - name: Clean Build Folder
         run: rm -rf ota_build
 
@@ -61,13 +61,27 @@ jobs:
             --output-dir ./ota_build \
             ItedaFirmware.ino
 
-          cp ota_build/*.bin ota_build/ItedaFirmware.bin
+          echo "Build output:"
+          ls -R ota_build
 
-      # ---------------- BUILD VERSION (100% RELIABLE) ----------------
+      # ---------------- SAFE BIN EXTRACTION ----------------
+      - name: Fix Binary Output
+        run: |
+          BIN_FILE=$(find ota_build -name "*.bin" | head -n 1)
+
+          if [ -z "$BIN_FILE" ]; then
+            echo "ERROR: No binary found!"
+            exit 1
+          fi
+
+          echo "Found binary: $BIN_FILE"
+
+          cp "$BIN_FILE" ota_build/ItedaFirmware.bin
+
+      # ---------------- VERSION ----------------
       - name: Extract Version
         run: |
           VERSION=$(grep 'VERSION' ItedaFirmware.ino | head -n1 | cut -d'"' -f2)
-
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       # ---------------- MANIFEST ----------------
@@ -75,21 +89,19 @@ jobs:
         run: |
           REPO_NAME=$(basename "${{ github.repository }}")
 
-          echo "Building manifest for version: $VERSION"
-
           cat > ota_build/manifest.json <<EOF
           {
             "version": "$VERSION",
-            "build_number": "${GITHUB_RUN_NUMBER}",
+            "build": "${GITHUB_RUN_NUMBER}",
             "bin_url": "https://${{ github.repository_owner }}.github.io/$REPO_NAME/ItedaFirmware.bin?v=${GITHUB_RUN_NUMBER}"
           }
           EOF
 
-      # ---------------- DEBUG OUTPUT ----------------
-      - name: Show Build Files
+      # ---------------- DEBUG ----------------
+      - name: Show Final Files
         run: ls -lah ota_build
 
-      # ---------------- UPLOAD ARTIFACT ----------------
+      # ---------------- UPLOAD ----------------
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
         with:
