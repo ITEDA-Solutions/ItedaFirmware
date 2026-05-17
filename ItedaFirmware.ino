@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.6";
+const char* VERSION = "1.7";
 const char* ssid = "masinde";
 const char* password = "14414@Starehe";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -172,7 +172,7 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   // Main DB columns
   doc["chamber_temp"] = t[1];          // Middle chamber temp
   doc["ambient_temp"] = t[3];
-  doc["heater_temp"] = t[2];           // Top sensor near heater
+  doc["heater_temp"] = t[0];           // Top sensor near heater
 
   doc["internal_humidity"] = h[1];
   doc["external_humidity"] = h[3];
@@ -234,7 +234,7 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   // ---------------- SERIAL DEBUG ----------------
   Serial.println("\n================================================");
-  Serial.println(">>> OUTGOING PAYLOAD v1.4 <<<");
+  Serial.println(">>> OUTGOING PAYLOAD v1.7 <<<");
 
   serializeJsonPretty(doc, Serial);
 
