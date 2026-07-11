@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.8";
+const char* VERSION = "1.9";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
@@ -37,7 +37,16 @@ const char* AUTH_TOKEN = "YOUR_TOKEN";
 
 #define CURRENT_PIN 6
 
+// GSM 900A — IO11 -> 3VT (module TX), IO12 -> 3VR (module RX)
+#define GSM_RX 11
+#define GSM_TX 12
+#define GSM_BAUD 9600
+
 // -------------------- GLOBALS --------------------
+HardwareSerial GSM(1);
+
+bool gsmReady = false;
+int gsmSignal = -1;
 DHT dhts[] = {
   {DHTPIN1, DHTTYPE},
   {DHTPIN2, DHTTYPE},
@@ -60,6 +69,61 @@ unsigned long lastBlinkRed = 0;
 
 bool greenState = false;
 bool redState = false;
+
+// -------------------- GSM --------------------
+String gsmSendAT(const char* cmd, unsigned long timeoutMs = 2000) {
+  while (GSM.available()) {
+    GSM.read();
+  }
+
+  GSM.println(cmd);
+  Serial.printf("[GSM] >> %s\n", cmd);
+
+  String response;
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    while (GSM.available()) {
+      response += (char)GSM.read();
+    }
+    if (response.indexOf("OK") >= 0 || response.indexOf("ERROR") >= 0) {
+      break;
+    }
+    delay(10);
+  }
+
+  response.trim();
+  if (response.length() > 0) {
+    Serial.printf("[GSM] << %s\n", response.c_str());
+  }
+
+  return response;
+}
+
+bool gsmInit() {
+  Serial.println("\n[GSM] Initializing SIM900A...");
+
+  GSM.begin(GSM_BAUD, SERIAL_8N1, GSM_RX, GSM_TX);
+  delay(1000);
+
+  String at = gsmSendAT("AT", 3000);
+  if (at.indexOf("OK") < 0) {
+    Serial.println("[GSM] No response to AT — check wiring and power.");
+    return false;
+  }
+
+  gsmSendAT("ATE0");  // disable echo
+
+  String csq = gsmSendAT("AT+CSQ");
+  int comma = csq.indexOf("+CSQ:");
+  if (comma >= 0) {
+    gsmSignal = csq.substring(comma + 6, comma + 8).toInt();
+    Serial.printf("[GSM] Signal strength (CSQ): %d\n", gsmSignal);
+  }
+
+  Serial.println("[GSM] Module responding.");
+  return true;
+}
 
 // -------------------- UTILITIES --------------------
 String getDeviceID() {
@@ -223,6 +287,9 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   sensorValues["firmware_version"] = VERSION;
 
+  sensorValues["gsm_ready"] = gsmReady;
+  sensorValues["gsm_signal_csq"] = gsmSignal;
+
   sensorValues["wifi_rssi"] = WiFi.RSSI();
 
   sensorValues["uptime_ms"] = millis();
@@ -234,7 +301,7 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   // ---------------- SERIAL DEBUG ----------------
   Serial.println("\n================================================");
-  Serial.println(">>> OUTGOING PAYLOAD v1.7 <<<");
+  Serial.printf(">>> OUTGOING PAYLOAD v%s <<<\n", VERSION);
 
   serializeJsonPretty(doc, Serial);
 
@@ -327,6 +394,9 @@ void setup() {
 
   myPID.SetMode(AUTOMATIC);
 
+  // ---------------- GSM ----------------
+  gsmReady = gsmInit();
+
   // ---------------- OTA ----------------
   checkOTA();
 }
@@ -414,6 +484,18 @@ void loop() {
     );
 
     lastSend = now;
+  }
+
+  // ---------------- GSM HEARTBEAT ----------------
+  static unsigned long lastGsm = 0;
+
+  if (gsmReady && now - lastGsm > 60000) {
+    String csq = gsmSendAT("AT+CSQ");
+    int comma = csq.indexOf("+CSQ:");
+    if (comma >= 0) {
+      gsmSignal = csq.substring(comma + 6, comma + 8).toInt();
+    }
+    lastGsm = now;
   }
 
   // ---------------- OTA CHECK ----------------
