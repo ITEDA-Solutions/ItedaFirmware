@@ -8,9 +8,10 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "1.9";
+const char* VERSION = "2.0";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
+const char* GPRS_APN = "internet";  // Airtel Kenya
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
@@ -47,6 +48,8 @@ HardwareSerial GSM(1);
 
 bool gsmReady = false;
 int gsmSignal = -1;
+const char* lastSendMethod = "none";
+bool lastSendSuccess = false;
 DHT dhts[] = {
   {DHTPIN1, DHTTYPE},
   {DHTPIN2, DHTTYPE},
@@ -123,6 +126,121 @@ bool gsmInit() {
 
   Serial.println("[GSM] Module responding.");
   return true;
+}
+
+bool gsmGprsAttach() {
+  gsmSendAT("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"");
+
+  String apnCmd = String("AT+SAPBR=3,1,\"APN\",\"") + GPRS_APN + "\"";
+  gsmSendAT(apnCmd.c_str());
+
+  String result = gsmSendAT("AT+SAPBR=1,1", 15000);
+  return result.indexOf("OK") >= 0;
+}
+
+bool sendViaGSM(const String& json) {
+  Serial.println("[API] Sending data via GSM...");
+
+  if (!gsmGprsAttach()) {
+    Serial.println("[GSM] GPRS attach failed.");
+    return false;
+  }
+
+  if (gsmSendAT("AT+HTTPINIT").indexOf("OK") < 0) {
+    Serial.println("[GSM] HTTP init failed.");
+    return false;
+  }
+
+  String urlCmd = String("AT+HTTPPARA=\"URL\",\"") + API_URL + "\"";
+  gsmSendAT(urlCmd.c_str());
+  gsmSendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+
+  String authHeader = String("Authorization: Bearer ") + AUTH_TOKEN;
+  String authCmd = String("AT+HTTPPARA=\"USERDATA\",\"") + authHeader + "\"";
+  gsmSendAT(authCmd.c_str());
+
+  String dataCmd = "AT+HTTPDATA=" + String(json.length()) + ",30000";
+  GSM.println(dataCmd);
+  Serial.printf("[GSM] >> %s\n", dataCmd.c_str());
+
+  unsigned long start = millis();
+  String prompt;
+
+  while (millis() - start < 5000) {
+    while (GSM.available()) {
+      prompt += (char)GSM.read();
+    }
+    if (prompt.indexOf("DOWNLOAD") >= 0) {
+      break;
+    }
+    delay(10);
+  }
+
+  if (prompt.indexOf("DOWNLOAD") < 0) {
+    Serial.println("[GSM] HTTPDATA prompt not received.");
+    gsmSendAT("AT+HTTPTERM");
+    gsmSendAT("AT+SAPBR=1,0");
+    return false;
+  }
+
+  GSM.print(json);
+  delay(1000);
+
+  String action = gsmSendAT("AT+HTTPACTION=1", 60000);
+  gsmSendAT("AT+HTTPREAD");
+  gsmSendAT("AT+HTTPTERM");
+  gsmSendAT("AT+SAPBR=1,0");
+
+  bool ok = (
+    action.indexOf(",200,") >= 0 ||
+    action.indexOf(",201,") >= 0
+  );
+
+  if (ok) {
+    Serial.println("[API] Data sent successfully via GSM.");
+  } else {
+    Serial.printf("[GSM] HTTP POST failed: %s\n", action.c_str());
+  }
+
+  return ok;
+}
+
+bool sendViaWiFi(const String& json) {
+  Serial.println("[API] Sending data via WiFi...");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+
+  if (!https.begin(client, API_URL)) {
+    Serial.println("[WIFI] Failed to begin HTTPS request.");
+    return false;
+  }
+
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("Authorization", "Bearer " + String(AUTH_TOKEN));
+
+  int httpCode = https.POST(json);
+
+  Serial.printf("[API] POST Result: %d\n", httpCode);
+
+  if (httpCode > 0) {
+    Serial.println("[API] Response:");
+    Serial.println(https.getString());
+  } else {
+    Serial.println("[API] Failed Request");
+  }
+
+  https.end();
+
+  bool ok = (httpCode >= 200 && httpCode < 300);
+
+  if (ok) {
+    Serial.println("[API] Data sent successfully via WiFi.");
+  }
+
+  return ok;
 }
 
 // -------------------- UTILITIES --------------------
@@ -212,17 +330,6 @@ void checkOTA() {
 // -------------------- API --------------------
 void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
-  if (WiFi.status() != WL_CONNECTED) {
-
-    Serial.println("[WIFI] Disconnected! Cannot send payload.");
-    return;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient https;
-
   StaticJsonDocument<2048> doc;
 
   // =========================================================
@@ -289,8 +396,10 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   sensorValues["gsm_ready"] = gsmReady;
   sensorValues["gsm_signal_csq"] = gsmSignal;
-
-  sensorValues["wifi_rssi"] = WiFi.RSSI();
+  sensorValues["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  sensorValues["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  sensorValues["data_send_method"] = lastSendMethod;
+  sensorValues["data_send_success"] = lastSendSuccess;
 
   sensorValues["uptime_ms"] = millis();
 
@@ -307,32 +416,40 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   Serial.println("\n================================================");
 
-  // ---------------- SEND ----------------
-  if (https.begin(client, API_URL)) {
+  // ---------------- SEND (WiFi first, GSM fallback) ----------------
+  bool sent = false;
 
-    https.addHeader("Content-Type", "application/json");
-
-    https.addHeader(
-      "Authorization",
-      "Bearer " + String(AUTH_TOKEN)
-    );
-
-    int httpCode = https.POST(json);
-
-    Serial.printf("[API] POST Result: %d\n", httpCode);
-
-    if (httpCode > 0) {
-
-      Serial.println("[API] Response:");
-      Serial.println(https.getString());
-
-    } else {
-
-      Serial.println("[API] Failed Request");
+  if (WiFi.status() == WL_CONNECTED) {
+    sent = sendViaWiFi(json);
+    if (sent) {
+      lastSendMethod = "wifi";
     }
-
-    https.end();
   }
+
+  if (!sent && gsmReady) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[API] WiFi unavailable — trying GSM...");
+    } else {
+      Serial.println("[API] WiFi send failed — trying GSM...");
+    }
+    sent = sendViaGSM(json);
+    if (sent) {
+      lastSendMethod = "gsm";
+    }
+  }
+
+  if (!sent) {
+    lastSendMethod = "none";
+    Serial.println("[API] Failed to send data — no working connection.");
+  }
+
+  lastSendSuccess = sent;
+
+  Serial.printf(
+    "\n[API] >>> Data sent via: %s (%s) <<<\n\n",
+    lastSendMethod,
+    lastSendSuccess ? "success" : "failed"
+  );
 }
 
 // -------------------- MAIN --------------------
@@ -367,7 +484,12 @@ void setup() {
 
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long wifiStart = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - wifiStart < 30000
+  ) {
 
     digitalWrite(
       LED_YELLOW,
@@ -381,11 +503,13 @@ void setup() {
 
   digitalWrite(LED_YELLOW, LOW);
 
-  Serial.println("\n[WIFI] Connected!");
-  Serial.println(WiFi.localIP());
-
-  // ---------------- NTP ----------------
-  configTime(0, 0, "pool.ntp.org");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WIFI] Connected!");
+    Serial.println(WiFi.localIP());
+    configTime(0, 0, "pool.ntp.org");
+  } else {
+    Serial.println("\n[WIFI] Connection failed — will use GSM for data if available.");
+  }
 
   // ---------------- PID ----------------
   windowStartTime = millis();
