@@ -19,27 +19,20 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-
-      # ---------------- CHECKOUT ----------------
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ---------------- ARDUINO CLI ----------------
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      # ---------------- ESP32 CORE ----------------
       - name: Install ESP32 Platform
         run: |
           arduino-cli config init
-
           arduino-cli config add board_manager.additional_urls \
-          https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
-      # ---------------- LIBRARIES ----------------
       - name: Install Libraries
         run: |
           arduino-cli lib install "DHT sensor library"
@@ -47,67 +40,84 @@ jobs:
           arduino-cli lib install "ArduinoJson@6.21.5"
           arduino-cli lib install "PID"
 
-      # ---------------- CLEAN ----------------
       - name: Clean Build Folder
-        run: rm -rf ota_build
+        run: rm -rf ota_build pages_deploy
 
-      # ---------------- COMPILE ----------------
       - name: Compile Firmware
         run: |
           mkdir -p ota_build
-
           arduino-cli compile \
             --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=app3M_fat9M_16MB \
             --output-dir ./ota_build \
             ItedaFirmware.ino
-
           echo "Build output:"
-          ls -R ota_build
+          ls -lahR ota_build
 
-      # ---------------- SAFE BIN EXTRACTION ----------------
-      - name: Fix Binary Output
+      # BUG FIX: arduino-cli emits several .bin files (app, bootloader, partitions).
+      # `find … | head -n 1` often picks the ~20KB bootloader. OTA must get *.ino.bin.
+      - name: Select Application Binary
         run: |
-          BIN_FILE=$(find ota_build -name "*.bin" | head -n 1)
+          set -euo pipefail
+          mkdir -p pages_deploy
 
-          if [ -z "$BIN_FILE" ]; then
-            echo "ERROR: No binary found!"
+          echo "All .bin files produced:"
+          find ota_build -name "*.bin" -printf "%s\t%p\n" | sort -n
+
+          APP_BIN=$(find ota_build -type f -name "*.ino.bin" \
+            ! -name "*bootloader*" \
+            ! -name "*partitions*" \
+            ! -name "*merged*" \
+            | head -n 1)
+
+          if [ -z "${APP_BIN}" ]; then
+            echo "ERROR: Application binary (*.ino.bin) not found"
             exit 1
           fi
 
-          echo "Found binary: $BIN_FILE"
+          SIZE=$(stat -c%s "$APP_BIN")
+          echo "Using application binary: $APP_BIN ($SIZE bytes)"
 
-          cp "$BIN_FILE" ota_build/ItedaFirmware.bin
+          # Real ESP32 Arduino sketches with WiFi/TLS are hundreds of KB+.
+          # Bootloader is typically ~15–25KB — reject that class of mistake.
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "ERROR: Binary is only $SIZE bytes — almost certainly not the app image"
+            exit 1
+          fi
 
-      # ---------------- VERSION ----------------
+          cp "$APP_BIN" pages_deploy/ItedaFirmware.bin
+          ls -lah pages_deploy/ItedaFirmware.bin
+
       - name: Extract Version
         run: |
-          VERSION=$(grep 'VERSION' ItedaFirmware.ino | head -n1 | cut -d'"' -f2)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          VERSION=$(grep -E '^\s*const char\*\s+VERSION\s*=' ItedaFirmware.ino | head -n1 | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not extract VERSION from ItedaFirmware.ino"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Extracted VERSION=$VERSION"
 
-      # ---------------- MANIFEST ----------------
       - name: Generate Manifest
         run: |
           REPO_NAME=$(basename "${{ github.repository }}")
-
-          cat > ota_build/manifest.json <<EOF
+          cat > pages_deploy/manifest.json <<EOF
           {
-            "version": "$VERSION",
+            "version": "${VERSION}",
             "build": "${GITHUB_RUN_NUMBER}",
-            "bin_url": "https://${{ github.repository_owner }}.github.io/$REPO_NAME/ItedaFirmware.bin?v=${GITHUB_RUN_NUMBER}"
+            "bin_url": "https://${{ github.repository_owner }}.github.io/${REPO_NAME}/ItedaFirmware.bin?v=${GITHUB_RUN_NUMBER}"
           }
           EOF
+          echo "Manifest:"
+          cat pages_deploy/manifest.json
 
-      # ---------------- DEBUG ----------------
-      - name: Show Final Files
-        run: ls -lah ota_build
+      - name: Show Deploy Bundle
+        run: ls -lah pages_deploy
 
-      # ---------------- UPLOAD ----------------
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./ota_build
+          path: ./pages_deploy
 
-      # ---------------- DEPLOY ----------------
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
