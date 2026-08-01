@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.0";
+const char* VERSION = "2.1";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -328,9 +328,7 @@ void checkOTA() {
 }
 
 // -------------------- API --------------------
-void sendPayload(float t[], float h[], int m[], int currentRaw) {
-
-  StaticJsonDocument<2048> doc;
+void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentRaw) {
 
   // =========================================================
   // MATCHING SUPABASE sensor_readings TABLE
@@ -339,6 +337,8 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   doc["dryer_id"] = getDeviceID();
 
   doc["timestamp"] = getTimestamp();
+
+  doc["firmware_version"] = VERSION;
 
   // Main DB columns
   doc["chamber_temp"] = t[1];          // Middle chamber temp
@@ -398,15 +398,31 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   sensorValues["gsm_signal_csq"] = gsmSignal;
   sensorValues["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
   sensorValues["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
-  sensorValues["data_send_method"] = lastSendMethod;
-  sensorValues["data_send_success"] = lastSendSuccess;
+
+  // Outcome of the transmission before this one — the result of the current
+  // send is only known after the payload has already left the device.
+  sensorValues["previous_send_success"] = lastSendSuccess;
+  sensorValues["previous_send_method"] = lastSendMethod;
 
   sensorValues["uptime_ms"] = millis();
+}
 
-  // =========================================================
+// Stamps the transport carrying this payload so the server sees the link
+// that actually delivered it, not the one used on the previous cycle.
+void setTransport(JsonDocument& doc, const char* method) {
+  doc["connection_type"] = method;
+  doc["sensor_values"]["data_send_method"] = method;
+}
 
-  String json;
-  serializeJson(doc, json);
+void sendPayload(float t[], float h[], int m[], int currentRaw) {
+
+  StaticJsonDocument<2048> doc;
+
+  buildPayload(doc, t, h, m, currentRaw);
+
+  bool wifiUp = (WiFi.status() == WL_CONNECTED);
+
+  setTransport(doc, wifiUp ? "wifi" : (gsmReady ? "gsm" : "none"));
 
   // ---------------- SERIAL DEBUG ----------------
   Serial.println("\n================================================");
@@ -418,31 +434,43 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   // ---------------- SEND (WiFi first, GSM fallback) ----------------
   bool sent = false;
+  const char* method = "none";
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (wifiUp) {
+    String json;
+    serializeJson(doc, json);
+
     sent = sendViaWiFi(json);
+
     if (sent) {
-      lastSendMethod = "wifi";
+      method = "wifi";
     }
   }
 
   if (!sent && gsmReady) {
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiUp) {
       Serial.println("[API] WiFi unavailable — trying GSM...");
     } else {
       Serial.println("[API] WiFi send failed — trying GSM...");
     }
+
+    setTransport(doc, "gsm");
+
+    String json;
+    serializeJson(doc, json);
+
     sent = sendViaGSM(json);
+
     if (sent) {
-      lastSendMethod = "gsm";
+      method = "gsm";
     }
   }
 
   if (!sent) {
-    lastSendMethod = "none";
     Serial.println("[API] Failed to send data — no working connection.");
   }
 
+  lastSendMethod = method;
   lastSendSuccess = sent;
 
   Serial.printf(
