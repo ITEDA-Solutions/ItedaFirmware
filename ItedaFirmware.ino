@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.2";
+const char* VERSION = "2.3";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -281,49 +281,99 @@ void checkOTA() {
 
   Serial.println("\n[SYSTEM] Checking for updates...");
 
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[OTA] Skipped — WiFi not connected.");
+    return;
+  }
+
   WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(20000);
 
   HTTPClient http;
+  http.setTimeout(20000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  if (http.begin(client, MANIFEST_URL)) {
+  if (!http.begin(client, MANIFEST_URL)) {
+    Serial.println("[OTA] Failed to begin manifest request.");
+    return;
+  }
 
-    int code = http.GET();
+  int code = http.GET();
 
-    if (code == HTTP_CODE_OK) {
-
-      StaticJsonDocument<256> doc;
-
-      deserializeJson(doc, http.getString());
-
-      const char* newVersion = doc["version"];
-
-      if (strcmp(newVersion, VERSION) != 0) {
-
-        Serial.printf(
-          "[OTA] New Version Found: %s. Current: %s\n",
-          newVersion,
-          VERSION
-        );
-
-        digitalWrite(LED_YELLOW, HIGH);
-
-        httpUpdate.update(client, (const char*)doc["bin_url"]);
-
-      } else {
-
-        Serial.println("[OTA] System up to date.");
-      }
-
-    } else {
-
-      Serial.printf(
-        "[OTA] Failed to fetch manifest. HTTP Code: %d\n",
-        code
-      );
-    }
-
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[OTA] Failed to fetch manifest. HTTP Code: %d\n", code);
     http.end();
+    return;
+  }
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+
+  // Must release the manifest connection before starting the binary download
+  // on the same WiFiClientSecure — otherwise HTTPUpdate silently fails.
+  http.end();
+
+  if (err) {
+    Serial.printf("[OTA] Manifest JSON parse error: %s\n", err.c_str());
+    return;
+  }
+
+  const char* newVersion = doc["version"] | "";
+  const char* binUrl = doc["bin_url"] | "";
+
+  if (strlen(newVersion) == 0 || strlen(binUrl) == 0) {
+    Serial.println("[OTA] Manifest missing version or bin_url.");
+    return;
+  }
+
+  Serial.printf("[OTA] Manifest version: %s | Device version: %s\n", newVersion, VERSION);
+  Serial.printf("[OTA] bin_url: %s\n", binUrl);
+
+  if (strcmp(newVersion, VERSION) == 0) {
+    Serial.println("[OTA] System up to date.");
+    return;
+  }
+
+  // Copy out of the JsonDocument before any further network use.
+  String updateUrl = String(binUrl);
+
+  Serial.printf(
+    "[OTA] New version found: %s (current: %s). Downloading...\n",
+    newVersion,
+    VERSION
+  );
+
+  digitalWrite(LED_YELLOW, HIGH);
+
+  // Fresh TLS client for the binary download.
+  WiFiClientSecure updateClient;
+  updateClient.setInsecure();
+  updateClient.setTimeout(20000);
+
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  httpUpdate.rebootOnUpdate(true);
+
+  t_httpUpdate_return ret = httpUpdate.update(updateClient, updateUrl);
+
+  digitalWrite(LED_YELLOW, LOW);
+
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf(
+        "[OTA] Update failed (%d): %s\n",
+        httpUpdate.getLastError(),
+        httpUpdate.getLastErrorString().c_str()
+      );
+      break;
+
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("[OTA] No updates available.");
+      break;
+
+    case HTTP_UPDATE_OK:
+      Serial.println("[OTA] Update OK — rebooting.");
+      break;
   }
 }
 
