@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.1";
+const char* VERSION = "2.2";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -348,7 +348,6 @@ void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentR
   doc["internal_humidity"] = h[1];
   doc["external_humidity"] = h[3];
 
-  doc["fan_speed_rpm"] = 0;            // No RPM sensor yet
   doc["fan_status"] = true;
 
   doc["heater_status"] = heaterActive;
@@ -384,6 +383,9 @@ void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentR
   sensorValues["tray_2_moisture"] = m[1];
   sensorValues["tray_3_moisture"] = m[2];
   sensorValues["tray_4_moisture"] = m[3];
+
+  // Fan
+  sensorValues["fan_speed_rpm"] = 0;   // No RPM sensor yet
 
   // PID + system telemetry
   sensorValues["pid_setpoint"] = Setpoint;
