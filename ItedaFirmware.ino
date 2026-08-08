@@ -9,13 +9,17 @@
 #include <sys/time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.6";
+const char* VERSION = "2.7";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
 const char* API_URL = "https://iteda-solutions-dryers-platform.vercel.app/api/sensor-data";
 const char* MANIFEST_URL = "https://iteda-solutions.github.io/ItedaFirmware/manifest.json";
 const char* AUTH_TOKEN = "YOUR_TOKEN";
+
+// Network unlock key (NCK) for a carrier-locked module — the code the seller
+// supplies for a "+CPIN: PH-NET PIN" module. Leave empty if not locked.
+const char* GSM_NCK = "";
 
 // -------------------- PIN DEFINITIONS --------------------
 #define DHTPIN1 7    // Chamber Bottom
@@ -54,6 +58,7 @@ bool gsmReady = false;
 bool gsmSimOk = false;
 bool gsmRegistered = false;
 bool gsmDataReady = false;
+bool gsmCarrierLocked = false;   // module rejects this operator (PH-NET PIN)
 
 int gsmSignal = -1;
 int gsmRegStatus = -1;
@@ -263,6 +268,7 @@ bool gsmInit() {
   gsmSimOk = false;
   gsmRegistered = false;
   gsmDataReady = false;
+  gsmCarrierLocked = false;
   gsmSignal = -1;
   gsmRegStatus = -1;
 
@@ -319,6 +325,32 @@ bool gsmInit() {
       break;
     }
 
+    // "PH-NET PIN" and friends are personalization locks on the MODULE, not
+    // the card. The SIM has already been read at this point — waiting or
+    // reseating it changes nothing, so stop polling immediately.
+    if (pin.indexOf("PH-") >= 0) {
+      if (strlen(GSM_NCK) == 0) {
+        break;
+      }
+
+      Serial.println("[GSM] Module is network-locked — trying the configured NCK...");
+
+      String unlock = String("AT+CPIN=\"") + GSM_NCK + "\"";
+      gsmSendAT(unlock.c_str(), 10000);
+      delay(3000);
+
+      pin = gsmSendAT("AT+CPIN?", 5000);
+
+      if (pin.indexOf("READY") >= 0) {
+        Serial.println("[GSM] Network lock cleared.");
+        gsmSimOk = true;
+      } else {
+        Serial.println("[GSM] NCK rejected — the code does not match this module.");
+      }
+
+      break;
+    }
+
     if (pin.indexOf("SIM PIN") >= 0 || pin.indexOf("SIM PUK") >= 0) {
       break;    // locked, waiting will not help
     }
@@ -328,7 +360,17 @@ bool gsmInit() {
   }
 
   if (!gsmSimOk) {
-    if (pin.indexOf("SIM PIN") >= 0) {
+    if (pin.indexOf("PH-") >= 0) {
+      gsmCarrierLocked = true;
+      Serial.println("[GSM] ***** MODULE IS CARRIER-LOCKED *****");
+      Serial.printf ("[GSM] Reply: %s\n", pin.c_str());
+      Serial.println("[GSM] The SIM IS being read — the module refuses this operator.");
+      Serial.println("[GSM] Fix: get the NCK unlock code from the seller and set GSM_NCK,");
+      Serial.println("[GSM]      or use a SIM from the operator the module is locked to,");
+      Serial.println("[GSM]      or replace the module with an unlocked one.");
+      Serial.printf ("[GSM] Quote this IMEI to the seller: %s\n",
+                     gsmIMEI.length() ? gsmIMEI.c_str() : "unknown");
+    } else if (pin.indexOf("SIM PIN") >= 0) {
       Serial.println("[GSM] SIM is PIN-locked — disable the PIN on a phone first.");
     } else if (pin.indexOf("SIM PUK") >= 0) {
       Serial.println("[GSM] SIM is PUK-locked — unlock it on a phone.");
@@ -770,6 +812,7 @@ void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentR
 
   sensorValues["gsm_ready"] = gsmReady;
   sensorValues["gsm_sim_present"] = gsmSimOk;
+  sensorValues["gsm_carrier_locked"] = gsmCarrierLocked;
   sensorValues["gsm_registered"] = gsmRegistered;
   sensorValues["gsm_data_ready"] = gsmDataReady;
   sensorValues["gsm_signal_csq"] = gsmSignal;
@@ -932,7 +975,9 @@ void setup() {
   // ---------------- LINK SUMMARY ----------------
   Serial.println("\n[SYSTEM] ---------- Link status ----------");
   Serial.printf("[SYSTEM] GSM module   : %s\n", gsmReady ? "detected" : "NOT DETECTED");
-  Serial.printf("[SYSTEM] SIM card     : %s\n", gsmSimOk ? "detected" : "NOT DETECTED");
+  Serial.printf("[SYSTEM] SIM card     : %s\n",
+                gsmSimOk ? "detected"
+                         : (gsmCarrierLocked ? "read, but module is CARRIER-LOCKED" : "NOT DETECTED"));
   Serial.printf("[SYSTEM] Registration : %s\n", gsmRegistered ? "registered" : "not registered");
   Serial.printf("[SYSTEM] Primary link : %s\n",
                 gsmDataReady ? "GSM/GPRS"
@@ -1053,8 +1098,9 @@ void loop() {
     } else if (!gsmRegistered && wasRegistered) {
       Serial.printf("[GSM] Lost registration (stat=%d) — falling back to WiFi.\n", gsmRegStatus);
       gsmDataReady = false;
-    } else if (!gsmSimOk) {
+    } else if (!gsmSimOk && !gsmCarrierLocked) {
       // No card at boot: cheap re-check so inserting one doesn't need a reset.
+      // Skipped when carrier-locked — that never clears without the NCK.
       if (gsmSendAT("AT+CPIN?", 5000).indexOf("READY") >= 0) {
         Serial.println("[GSM] SIM inserted — re-running bring-up.");
         gsmReady = gsmInit();
