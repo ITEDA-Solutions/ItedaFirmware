@@ -9,7 +9,7 @@
 #include <sys/time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.7";
+const char* VERSION = "2.8";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -67,6 +67,14 @@ String gsmIMEI = "";
 String gsmICCID = "";
 String gsmNumber = "";
 String gsmOperator = "";
+
+// A failing GSM send blocks loop() for up to ~90s with the heaters latched, so
+// GSM is parked after a few consecutive failures and WiFi serves immediately.
+const int GSM_MAX_FAILS = 3;
+const unsigned long GSM_SUSPEND_MS = 600000;   // 10 minutes
+
+int gsmFailCount = 0;
+unsigned long gsmSuspendedUntil = 0;
 
 const char* lastSendMethod = "none";
 bool lastSendSuccess = false;
@@ -550,7 +558,9 @@ bool sendViaGSM(const String& json) {
   GSM.print(json);
   delay(1000);
 
-  String action = gsmSendAT("AT+HTTPACTION=1", 60000);
+  // 30s rather than 60s: this call blocks the control loop, and a ~1KB POST
+  // over working GPRS completes well inside it.
+  String action = gsmSendAT("AT+HTTPACTION=1", 30000);
   gsmSendAT("AT+HTTPREAD");
   gsmSendAT("AT+HTTPTERM");
   gsmGprsDetach();
@@ -813,6 +823,7 @@ void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentR
   sensorValues["gsm_ready"] = gsmReady;
   sensorValues["gsm_sim_present"] = gsmSimOk;
   sensorValues["gsm_carrier_locked"] = gsmCarrierLocked;
+  sensorValues["gsm_suspended"] = (millis() < gsmSuspendedUntil);
   sensorValues["gsm_registered"] = gsmRegistered;
   sensorValues["gsm_data_ready"] = gsmDataReady;
   sensorValues["gsm_signal_csq"] = gsmSignal;
@@ -849,8 +860,9 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   buildPayload(doc, t, h, m, currentRaw);
 
   bool wifiUp = (WiFi.status() == WL_CONNECTED);
+  bool gsmUsable = gsmDataReady && (millis() >= gsmSuspendedUntil);
 
-  setTransport(doc, gsmDataReady ? "gsm" : (wifiUp ? "wifi" : "none"));
+  setTransport(doc, gsmUsable ? "gsm" : (wifiUp ? "wifi" : "none"));
 
   // ---------------- SERIAL DEBUG ----------------
   Serial.println("\n================================================");
@@ -864,7 +876,14 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
   bool sent = false;
   const char* method = "none";
 
-  if (gsmDataReady) {
+  // Network calls below block loop() for tens of seconds, during which the PID
+  // window never advances and the heater outputs are never updated. Drop them
+  // first so a stalled send cannot leave an element energised.
+  digitalWrite(HEATER_1, LOW);
+  digitalWrite(HEATER_2, LOW);
+  heaterActive = false;
+
+  if (gsmUsable) {
     String json;
     serializeJson(doc, json);
 
@@ -872,12 +891,25 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
     if (sent) {
       method = "gsm";
+      gsmFailCount = 0;
+    } else {
+      gsmFailCount++;
+
+      Serial.printf("[GSM] Send failure %d of %d.\n", gsmFailCount, GSM_MAX_FAILS);
+
+      if (gsmFailCount >= GSM_MAX_FAILS) {
+        gsmSuspendedUntil = millis() + GSM_SUSPEND_MS;
+        gsmFailCount = 0;
+
+        Serial.printf("[GSM] Parking GSM for %lu minutes — WiFi will carry the data.\n",
+                      GSM_SUSPEND_MS / 60000);
+      }
     }
   }
 
   if (!sent && wifiUp) {
-    if (!gsmDataReady) {
-      Serial.println("[API] GSM unavailable — falling back to WiFi...");
+    if (!gsmUsable) {
+      Serial.println("[API] GSM unavailable — using WiFi...");
     } else {
       Serial.println("[API] GSM send failed — falling back to WiFi...");
     }
@@ -1077,6 +1109,10 @@ void loop() {
       analogRead(CURRENT_PIN)
     );
 
+    // The send may have blocked for tens of seconds. Restart the PID window
+    // from now so the duty cycle resumes cleanly instead of catching up.
+    windowStartTime = millis();
+
     lastSend = now;
   }
 
@@ -1095,6 +1131,10 @@ void loop() {
       // the ICCID/number/operator fields are populated too.
       Serial.println("[GSM] Network recovered — re-running bring-up.");
       gsmReady = gsmInit();
+
+      // A genuine recovery earns a fresh set of attempts.
+      gsmFailCount = 0;
+      gsmSuspendedUntil = 0;
     } else if (!gsmRegistered && wasRegistered) {
       Serial.printf("[GSM] Lost registration (stat=%d) — falling back to WiFi.\n", gsmRegStatus);
       gsmDataReady = false;
