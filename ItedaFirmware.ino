@@ -6,9 +6,10 @@
 #include <DHT.h>
 #include <PID_v1.h>
 #include <time.h>
+#include <sys/time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.4";
+const char* VERSION = "2.5";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -46,8 +47,22 @@ const char* AUTH_TOKEN = "YOUR_TOKEN";
 // -------------------- GLOBALS --------------------
 HardwareSerial GSM(1);
 
+// gsmReady    — module answers AT (wiring/power/baud are correct)
+// gsmSimOk    — a SIM is physically present and unlocked
+// gsmDataReady— SIM registered on the network, so a GPRS send can be attempted
 bool gsmReady = false;
+bool gsmSimOk = false;
+bool gsmRegistered = false;
+bool gsmDataReady = false;
+
 int gsmSignal = -1;
+int gsmRegStatus = -1;
+
+String gsmIMEI = "";
+String gsmICCID = "";
+String gsmNumber = "";
+String gsmOperator = "";
+
 const char* lastSendMethod = "none";
 bool lastSendSuccess = false;
 DHT dhts[] = {
@@ -74,6 +89,8 @@ bool greenState = false;
 bool redState = false;
 
 // -------------------- GSM --------------------
+String getTimestamp();   // defined under UTILITIES, used by gsmSyncTime()
+
 String gsmSendAT(const char* cmd, unsigned long timeoutMs = 2000) {
   while (GSM.available()) {
     GSM.read();
@@ -103,28 +120,267 @@ String gsmSendAT(const char* cmd, unsigned long timeoutMs = 2000) {
   return response;
 }
 
+// Returns the text following `tag` up to the end of that line, e.g.
+// gsmValueAfter("+CSQ: 18,0", "+CSQ:") -> "18,0"
+String gsmValueAfter(const String& resp, const char* tag) {
+  int i = resp.indexOf(tag);
+  if (i < 0) {
+    return "";
+  }
+
+  i += strlen(tag);
+
+  int end = resp.indexOf('\n', i);
+  if (end < 0) {
+    end = resp.length();
+  }
+
+  String value = resp.substring(i, end);
+  value.trim();
+
+  return value;
+}
+
+// Pulls the n-th quoted field out of a response line (1-based).
+String gsmQuotedField(const String& resp, int index) {
+  int pos = 0;
+
+  for (int found = 0; found < index; found++) {
+    int open = resp.indexOf('"', pos);
+    if (open < 0) {
+      return "";
+    }
+
+    int close = resp.indexOf('"', open + 1);
+    if (close < 0) {
+      return "";
+    }
+
+    if (found == index - 1) {
+      return resp.substring(open + 1, close);
+    }
+
+    pos = close + 1;
+  }
+
+  return "";
+}
+
+// AT+GSN and AT+CCID answer with a bare digit string, so keep only the digits.
+String gsmDigitsOnly(const String& resp, unsigned int minLength) {
+  String out;
+
+  for (unsigned int i = 0; i < resp.length(); i++) {
+    if (isdigit(resp.charAt(i))) {
+      out += resp.charAt(i);
+    }
+  }
+
+  if (out.length() < minLength) {
+    return "";
+  }
+
+  return out;
+}
+
+int gsmParseCsq(const String& resp) {
+  String value = gsmValueAfter(resp, "+CSQ:");
+  if (value.length() == 0) {
+    return -1;
+  }
+
+  int comma = value.indexOf(',');
+  if (comma > 0) {
+    value = value.substring(0, comma);
+  }
+
+  value.trim();
+  return value.toInt();
+}
+
+// +CREG: <n>,<stat> — 1 = registered home, 5 = registered roaming.
+int gsmParseCreg(const String& resp) {
+  String value = gsmValueAfter(resp, "+CREG:");
+  if (value.length() == 0) {
+    return -1;
+  }
+
+  int comma = value.indexOf(',');
+  if (comma < 0) {
+    return -1;
+  }
+
+  return value.substring(comma + 1).toInt();
+}
+
+// Reads network time from the module (AT+CCLK?) and sets the ESP32 clock, so
+// payload timestamps are correct on a GSM-only boot with no NTP.
+bool gsmSyncTime() {
+  String resp = gsmSendAT("AT+CCLK?");
+
+  String clk = gsmQuotedField(resp, 1);   // "yy/MM/dd,hh:mm:ss+zz"
+  if (clk.length() < 17) {
+    return false;
+  }
+
+  struct tm t = {0};
+
+  int year, month, day, hour, minute, second;
+  int zone = 0;              // stays 0 if the module omits the offset field
+
+  if (sscanf(clk.c_str(), "%d/%d/%d,%d:%d:%d%d",
+             &year, &month, &day, &hour, &minute, &second, &zone) < 6) {
+    return false;
+  }
+
+  if (year < 24) {           // module clock never got a network update
+    return false;
+  }
+
+  t.tm_year = year + 100;    // struct tm counts from 1900, module gives yy
+  t.tm_mon  = month - 1;
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min  = minute;
+  t.tm_sec  = second;
+
+  time_t local = mktime(&t);
+
+  // <zone> is the offset from UTC in quarter-hours; back it out to get UTC.
+  struct timeval tv = { local - (zone * 15 * 60), 0 };
+  settimeofday(&tv, NULL);
+
+  Serial.printf("[GSM] Clock synced from network: %s\n", getTimestamp().c_str());
+  return true;
+}
+
+// Full bring-up: proves the module, then the SIM, then the network. Each stage
+// is reported separately so a boot log distinguishes "no module" from
+// "no SIM" from "SIM present but no coverage".
 bool gsmInit() {
-  Serial.println("\n[GSM] Initializing SIM900A...");
+  Serial.println("\n[GSM] ---------- SIM900A bring-up ----------");
+
+  gsmSimOk = false;
+  gsmRegistered = false;
+  gsmDataReady = false;
+  gsmSignal = -1;
+  gsmRegStatus = -1;
 
   GSM.begin(GSM_BAUD, SERIAL_8N1, GSM_RX, GSM_TX);
   delay(1000);
 
-  String at = gsmSendAT("AT", 3000);
-  if (at.indexOf("OK") < 0) {
-    Serial.println("[GSM] No response to AT — check wiring and power.");
+  // ---- 1. Module alive? Answers with no SIM inserted. ----
+  bool alive = false;
+
+  for (int attempt = 1; attempt <= 3 && !alive; attempt++) {
+    if (gsmSendAT("AT", 3000).indexOf("OK") >= 0) {
+      alive = true;
+    } else {
+      Serial.printf("[GSM] No reply to AT (attempt %d/3)...\n", attempt);
+      delay(2000);
+    }
+  }
+
+  if (!alive) {
+    Serial.println("[GSM] Module not responding — check TX/RX wiring, GND and the 5V/2A supply.");
     return false;
   }
 
-  gsmSendAT("ATE0");  // disable echo
+  gsmSendAT("ATE0");        // echo off, keeps the parsing simple
+  gsmSendAT("AT+CMEE=2");   // verbose errors ("SIM not inserted" not "ERROR")
 
-  String csq = gsmSendAT("AT+CSQ");
-  int comma = csq.indexOf("+CSQ:");
-  if (comma >= 0) {
-    gsmSignal = csq.substring(comma + 6, comma + 8).toInt();
-    Serial.printf("[GSM] Signal strength (CSQ): %d\n", gsmSignal);
+  gsmIMEI = gsmDigitsOnly(gsmSendAT("AT+GSN"), 15);
+  Serial.printf("[GSM] Module OK. IMEI: %s\n",
+                gsmIMEI.length() ? gsmIMEI.c_str() : "unknown");
+
+  // ---- 2. SIM present? This is the check that a valid CSQ does NOT prove. ----
+  String pin = gsmSendAT("AT+CPIN?", 8000);
+  gsmSimOk = (pin.indexOf("READY") >= 0);
+
+  if (!gsmSimOk) {
+    if (pin.indexOf("SIM PIN") >= 0) {
+      Serial.println("[GSM] SIM is PIN-locked — disable the PIN on a phone first.");
+    } else {
+      Serial.println("[GSM] NO SIM DETECTED — insert the card (contacts down, notch matching the holder).");
+    }
+
+    Serial.println("[GSM] Data will fall back to WiFi.");
+    return true;    // module itself is fine
   }
 
-  Serial.println("[GSM] Module responding.");
+  gsmICCID = gsmDigitsOnly(gsmSendAT("AT+CCID", 5000), 15);
+  Serial.printf("[GSM] SIM detected. ICCID: %s\n",
+                gsmICCID.length() ? gsmICCID.c_str() : "unreadable");
+
+  // ---- 3. Own number. Only present if the operator wrote MSISDN to the SIM. ----
+  gsmNumber = gsmQuotedField(gsmSendAT("AT+CNUM", 5000), 2);
+
+  if (gsmNumber.length()) {
+    Serial.printf("[GSM] SIM number: %s\n", gsmNumber.c_str());
+  } else {
+    Serial.println("[GSM] SIM number not stored on the card (normal — not an error).");
+  }
+
+  // ---- 4. Wait for network registration. ----
+  gsmSendAT("AT+CLTS=1");   // enable network time, used by gsmSyncTime()
+  gsmSendAT("AT+CREG=0");
+
+  unsigned long start = millis();
+
+  while (millis() - start < 60000) {
+    gsmRegStatus = gsmParseCreg(gsmSendAT("AT+CREG?"));
+
+    if (gsmRegStatus == 1 || gsmRegStatus == 5) {
+      gsmRegistered = true;
+      break;
+    }
+
+    if (gsmRegStatus == 3) {
+      Serial.println("[GSM] Registration DENIED — SIM may be inactive or unregistered with the operator.");
+      break;
+    }
+
+    Serial.println("[GSM] Searching for network...");
+    delay(3000);
+  }
+
+  gsmSignal = gsmParseCsq(gsmSendAT("AT+CSQ"));
+
+  if (!gsmRegistered) {
+    Serial.printf("[GSM] Not registered (CREG stat=%d, CSQ=%d) — check antenna, coverage and SIM credit.\n",
+                  gsmRegStatus, gsmSignal);
+    return true;
+  }
+
+  gsmOperator = gsmQuotedField(gsmSendAT("AT+COPS?", 10000), 1);
+
+  Serial.printf("[GSM] Registered on %s (%s), CSQ %d (~%d dBm)\n",
+                gsmOperator.length() ? gsmOperator.c_str() : "network",
+                gsmRegStatus == 5 ? "roaming" : "home",
+                gsmSignal,
+                gsmSignal > 0 && gsmSignal < 32 ? -113 + (2 * gsmSignal) : 0);
+
+  if (gsmSignal >= 0 && gsmSignal < 10) {
+    Serial.println("[GSM] WARNING: weak signal — GPRS uploads may time out. Reposition the antenna.");
+  }
+
+  // ---- 5. GPRS attach + clear any bearer left open by a previous run. ----
+  gsmSendAT("AT+CGATT=1", 15000);
+
+  String attached = gsmSendAT("AT+CGATT?");
+  if (gsmValueAfter(attached, "+CGATT:").toInt() != 1) {
+    Serial.println("[GSM] GPRS not attached — the SIM may have no data bundle.");
+  }
+
+  gsmSendAT("AT+SAPBR=0,1", 10000);   // close stale bearer, error here is fine
+
+  gsmSyncTime();
+
+  gsmDataReady = true;
+
+  Serial.println("[GSM] READY — GSM is the primary data link.");
+  Serial.println("[GSM] --------------------------------------");
+
   return true;
 }
 
@@ -135,25 +391,55 @@ bool gsmGprsAttach() {
   gsmSendAT(apnCmd.c_str());
 
   String result = gsmSendAT("AT+SAPBR=1,1", 15000);
-  return result.indexOf("OK") >= 0;
+
+  if (result.indexOf("OK") >= 0) {
+    return true;
+  }
+
+  // "already open" from a previous cycle still gives a usable bearer.
+  String query = gsmSendAT("AT+SAPBR=2,1", 10000);
+  return query.indexOf("+SAPBR: 1,1") >= 0;
+}
+
+// Closes the GPRS bearer. Note the argument order: <cmd_type>,<cid> — so
+// closing cid 1 is "0,1".
+void gsmGprsDetach() {
+  gsmSendAT("AT+SAPBR=0,1", 10000);
 }
 
 bool sendViaGSM(const String& json) {
   Serial.println("[API] Sending data via GSM...");
 
-  if (!gsmGprsAttach()) {
-    Serial.println("[GSM] GPRS attach failed.");
+  if (!gsmDataReady) {
+    Serial.println("[GSM] Skipped — no registered SIM.");
     return false;
   }
 
-  if (gsmSendAT("AT+HTTPINIT").indexOf("OK") < 0) {
-    Serial.println("[GSM] HTTP init failed.");
+  if (!gsmGprsAttach()) {
+    Serial.println("[GSM] GPRS attach failed — check the APN and that the SIM has data.");
     return false;
   }
+
+  gsmSendAT("AT+HTTPTERM");   // drop a session left open by a failed cycle
+
+  if (gsmSendAT("AT+HTTPINIT").indexOf("OK") < 0) {
+    Serial.println("[GSM] HTTP init failed.");
+    gsmGprsDetach();
+    return false;
+  }
+
+  gsmSendAT("AT+HTTPPARA=\"CID\",1");
 
   String urlCmd = String("AT+HTTPPARA=\"URL\",\"") + API_URL + "\"";
   gsmSendAT(urlCmd.c_str());
   gsmSendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  gsmSendAT("AT+HTTPPARA=\"REDIR\",1");
+
+  if (String(API_URL).startsWith("https")) {
+    if (gsmSendAT("AT+HTTPSSL=1").indexOf("OK") < 0) {
+      Serial.println("[GSM] WARNING: module rejected AT+HTTPSSL — this firmware cannot do HTTPS.");
+    }
+  }
 
   String authHeader = String("Authorization: Bearer ") + AUTH_TOKEN;
   String authCmd = String("AT+HTTPPARA=\"USERDATA\",\"") + authHeader + "\"";
@@ -179,7 +465,7 @@ bool sendViaGSM(const String& json) {
   if (prompt.indexOf("DOWNLOAD") < 0) {
     Serial.println("[GSM] HTTPDATA prompt not received.");
     gsmSendAT("AT+HTTPTERM");
-    gsmSendAT("AT+SAPBR=1,0");
+    gsmGprsDetach();
     return false;
   }
 
@@ -189,7 +475,7 @@ bool sendViaGSM(const String& json) {
   String action = gsmSendAT("AT+HTTPACTION=1", 60000);
   gsmSendAT("AT+HTTPREAD");
   gsmSendAT("AT+HTTPTERM");
-  gsmSendAT("AT+SAPBR=1,0");
+  gsmGprsDetach();
 
   bool ok = (
     action.indexOf(",200,") >= 0 ||
@@ -447,7 +733,16 @@ void buildPayload(JsonDocument& doc, float t[], float h[], int m[], int currentR
   sensorValues["firmware_version"] = VERSION;
 
   sensorValues["gsm_ready"] = gsmReady;
+  sensorValues["gsm_sim_present"] = gsmSimOk;
+  sensorValues["gsm_registered"] = gsmRegistered;
+  sensorValues["gsm_data_ready"] = gsmDataReady;
   sensorValues["gsm_signal_csq"] = gsmSignal;
+  sensorValues["gsm_signal_dbm"] =
+    (gsmSignal > 0 && gsmSignal < 32) ? -113 + (2 * gsmSignal) : 0;
+  sensorValues["gsm_operator"] = gsmOperator;
+  sensorValues["gsm_number"] = gsmNumber;
+  sensorValues["gsm_iccid"] = gsmICCID;
+  sensorValues["gsm_imei"] = gsmIMEI;
   sensorValues["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
   sensorValues["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
 
@@ -468,13 +763,15 @@ void setTransport(JsonDocument& doc, const char* method) {
 
 void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
-  StaticJsonDocument<2048> doc;
+  // Heap, not stack: the added modem identity fields push this past what the
+  // 8 KB loop-task stack can safely hold alongside the serialized copy.
+  DynamicJsonDocument doc(3072);
 
   buildPayload(doc, t, h, m, currentRaw);
 
   bool wifiUp = (WiFi.status() == WL_CONNECTED);
 
-  setTransport(doc, wifiUp ? "wifi" : (gsmReady ? "gsm" : "none"));
+  setTransport(doc, gsmDataReady ? "gsm" : (wifiUp ? "wifi" : "none"));
 
   // ---------------- SERIAL DEBUG ----------------
   Serial.println("\n================================================");
@@ -484,30 +781,11 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
   Serial.println("\n================================================");
 
-  // ---------------- SEND (WiFi first, GSM fallback) ----------------
+  // ---------------- SEND (GSM primary, WiFi fallback) ----------------
   bool sent = false;
   const char* method = "none";
 
-  if (wifiUp) {
-    String json;
-    serializeJson(doc, json);
-
-    sent = sendViaWiFi(json);
-
-    if (sent) {
-      method = "wifi";
-    }
-  }
-
-  if (!sent && gsmReady) {
-    if (!wifiUp) {
-      Serial.println("[API] WiFi unavailable — trying GSM...");
-    } else {
-      Serial.println("[API] WiFi send failed — trying GSM...");
-    }
-
-    setTransport(doc, "gsm");
-
+  if (gsmDataReady) {
     String json;
     serializeJson(doc, json);
 
@@ -515,6 +793,25 @@ void sendPayload(float t[], float h[], int m[], int currentRaw) {
 
     if (sent) {
       method = "gsm";
+    }
+  }
+
+  if (!sent && wifiUp) {
+    if (!gsmDataReady) {
+      Serial.println("[API] GSM unavailable — falling back to WiFi...");
+    } else {
+      Serial.println("[API] GSM send failed — falling back to WiFi...");
+    }
+
+    setTransport(doc, "wifi");
+
+    String json;
+    serializeJson(doc, json);
+
+    sent = sendViaWiFi(json);
+
+    if (sent) {
+      method = "wifi";
     }
   }
 
@@ -559,7 +856,10 @@ void setup() {
 
   analogReadResolution(12);
 
-  // ---------------- WIFI ----------------
+  // ---------------- GSM (primary link) ----------------
+  gsmReady = gsmInit();
+
+  // ---------------- WIFI (fallback link + OTA) ----------------
   Serial.print("[WIFI] Connecting to " + String(ssid));
 
   WiFi.begin(ssid, password);
@@ -587,9 +887,21 @@ void setup() {
     Serial.println("\n[WIFI] Connected!");
     Serial.println(WiFi.localIP());
     configTime(0, 0, "pool.ntp.org");
+  } else if (gsmDataReady) {
+    Serial.println("\n[WIFI] Not connected — running on GSM only (OTA disabled).");
   } else {
-    Serial.println("\n[WIFI] Connection failed — will use GSM for data if available.");
+    Serial.println("\n[WIFI] Connection failed and no GSM data link — device is offline.");
   }
+
+  // ---------------- LINK SUMMARY ----------------
+  Serial.println("\n[SYSTEM] ---------- Link status ----------");
+  Serial.printf("[SYSTEM] GSM module   : %s\n", gsmReady ? "detected" : "NOT DETECTED");
+  Serial.printf("[SYSTEM] SIM card     : %s\n", gsmSimOk ? "detected" : "NOT DETECTED");
+  Serial.printf("[SYSTEM] Registration : %s\n", gsmRegistered ? "registered" : "not registered");
+  Serial.printf("[SYSTEM] Primary link : %s\n",
+                gsmDataReady ? "GSM/GPRS"
+                             : (WiFi.status() == WL_CONNECTED ? "WiFi (GSM unavailable)" : "none"));
+  Serial.println("[SYSTEM] ---------------------------------\n");
 
   // ---------------- PID ----------------
   windowStartTime = millis();
@@ -597,9 +909,6 @@ void setup() {
   myPID.SetOutputLimits(0, WindowSize);
 
   myPID.SetMode(AUTOMATIC);
-
-  // ---------------- GSM ----------------
-  gsmReady = gsmInit();
 
   // ---------------- OTA ----------------
   checkOTA();
@@ -694,11 +1003,28 @@ void loop() {
   static unsigned long lastGsm = 0;
 
   if (gsmReady && now - lastGsm > 60000) {
-    String csq = gsmSendAT("AT+CSQ");
-    int comma = csq.indexOf("+CSQ:");
-    if (comma >= 0) {
-      gsmSignal = csq.substring(comma + 6, comma + 8).toInt();
+    gsmSignal = gsmParseCsq(gsmSendAT("AT+CSQ"));
+    gsmRegStatus = gsmParseCreg(gsmSendAT("AT+CREG?"));
+
+    bool wasRegistered = gsmRegistered;
+    gsmRegistered = (gsmRegStatus == 1 || gsmRegStatus == 5);
+
+    if (gsmRegistered && !wasRegistered) {
+      // Came back (or a SIM was inserted after boot) — redo the bring-up so
+      // the ICCID/number/operator fields are populated too.
+      Serial.println("[GSM] Network recovered — re-running bring-up.");
+      gsmReady = gsmInit();
+    } else if (!gsmRegistered && wasRegistered) {
+      Serial.printf("[GSM] Lost registration (stat=%d) — falling back to WiFi.\n", gsmRegStatus);
+      gsmDataReady = false;
+    } else if (!gsmSimOk) {
+      // No card at boot: cheap re-check so inserting one doesn't need a reset.
+      if (gsmSendAT("AT+CPIN?", 5000).indexOf("READY") >= 0) {
+        Serial.println("[GSM] SIM inserted — re-running bring-up.");
+        gsmReady = gsmInit();
+      }
     }
+
     lastGsm = now;
   }
 
