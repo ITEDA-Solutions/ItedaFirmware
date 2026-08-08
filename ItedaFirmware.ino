@@ -9,7 +9,7 @@
 #include <sys/time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.5";
+const char* VERSION = "2.6";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
@@ -293,15 +293,51 @@ bool gsmInit() {
   Serial.printf("[GSM] Module OK. IMEI: %s\n",
                 gsmIMEI.length() ? gsmIMEI.c_str() : "unknown");
 
+  // The UART answers AT several seconds before the SIM interface is powered.
+  // In minimum-functionality mode (CFUN=0) the SIM is not powered at all, and
+  // every CPIN query reports "not inserted" no matter what is in the holder.
+  String fun = gsmSendAT("AT+CFUN?", 5000);
+
+  if (gsmValueAfter(fun, "+CFUN:").toInt() != 1) {
+    Serial.println("[GSM] Module was in low-functionality mode — enabling full RF/SIM...");
+    gsmSendAT("AT+CFUN=1", 15000);
+    delay(3000);
+  }
+
   // ---- 2. SIM present? This is the check that a valid CSQ does NOT prove. ----
-  String pin = gsmSendAT("AT+CPIN?", 8000);
-  gsmSimOk = (pin.indexOf("READY") >= 0);
+  // Poll rather than ask once: a cold SIM900A commonly reports "SIM busy" or
+  // "NOT READY" for the first 5-15 s after power-up.
+  String pin;
+
+  unsigned long simStart = millis();
+
+  while (millis() - simStart < 20000) {
+    pin = gsmSendAT("AT+CPIN?", 5000);
+
+    if (pin.indexOf("READY") >= 0) {
+      gsmSimOk = true;
+      break;
+    }
+
+    if (pin.indexOf("SIM PIN") >= 0 || pin.indexOf("SIM PUK") >= 0) {
+      break;    // locked, waiting will not help
+    }
+
+    Serial.println("[GSM] SIM not ready yet, waiting...");
+    delay(2000);
+  }
 
   if (!gsmSimOk) {
     if (pin.indexOf("SIM PIN") >= 0) {
       Serial.println("[GSM] SIM is PIN-locked — disable the PIN on a phone first.");
+    } else if (pin.indexOf("SIM PUK") >= 0) {
+      Serial.println("[GSM] SIM is PUK-locked — unlock it on a phone.");
     } else {
-      Serial.println("[GSM] NO SIM DETECTED — insert the card (contacts down, notch matching the holder).");
+      Serial.println("[GSM] NO SIM DETECTED after 20s.");
+      Serial.println("[GSM]   1. Power: SIM900A needs 5V/2A of its OWN — it browns out on ESP32/USB power.");
+      Serial.println("[GSM]   2. Holder: card clicked fully in, gold contacts DOWN, notch matching the outline.");
+      Serial.println("[GSM]   3. Adapter: a nano SIM in a cheap adapter often loses contact — try a full-size card.");
+      Serial.printf ("[GSM]   Last CPIN reply was: %s\n", pin.length() ? pin.c_str() : "(no reply)");
     }
 
     Serial.println("[GSM] Data will fall back to WiFi.");
