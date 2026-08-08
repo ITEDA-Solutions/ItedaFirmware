@@ -8,7 +8,7 @@
 #include <time.h>
 
 // -------------------- CONFIGURATION --------------------
-const char* VERSION = "2.3";
+const char* VERSION = "2.4";
 const char* ssid = "dono-call";
 const char* password = "@ubiquitoU5";
 const char* GPRS_APN = "internet";  // Airtel Kenya
